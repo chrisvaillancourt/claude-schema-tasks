@@ -6,7 +6,8 @@
 #
 # The typecheck needs Claude Code's API declarations. When the engine has
 # loaded this folder it lays them in .claude-plugin/types/ (gitignored) and
-# that copy is used. Otherwise the script uses $CLAUDE_CODE_TYPES, or the
+# that copy is used, with its tools module, when both are there. Otherwise
+# the script uses $CLAUDE_CODE_TYPES, or the
 # newest copy the plugin-authoring skill wrote under the temp directory, and
 # writes a throwaway tsconfig outside the repo. TypeScript comes from
 # a `tsc` on PATH, else a pinned `bunx --package typescript@5.9.3 tsc`
@@ -26,8 +27,14 @@ claude plugin test "$root"
 [[ $run_tsc == 0 ]] && { echo "== typecheck skipped"; exit 0; }
 
 types=""
-if [[ -f "$root/.claude-plugin/types/claude-code/index.d.ts" ]]; then
-  types="$root/.claude-plugin/types/claude-code/index.d.ts"
+extra_types=()
+laid="$root/.claude-plugin/types"
+# The engine's copy splits the built-in tools into their own module; without it
+# a tool's input types as `unknown`, so use that copy only when it is complete.
+if [[ -f "$laid/claude-code/index.d.ts" && -f "$laid/claude-code-tools/index.d.ts" ]]; then
+  types="$laid/claude-code/index.d.ts"
+  extra_types=("$laid/claude-code-tools/index.d.ts")
+  [[ -f "$laid/claude-code-mcp/index.d.ts" ]] && extra_types+=("$laid/claude-code-mcp/index.d.ts")
 elif [[ -n "${CLAUDE_CODE_TYPES:-}" ]]; then
   types="$CLAUDE_CODE_TYPES"
 else
@@ -49,6 +56,7 @@ fi
 
 tmp="$(mktemp -d)"
 include=("\"$types\"" "\"$root/hooks\"" "\"$root/types\"")
+for t in ${extra_types[@]+"${extra_types[@]}"}; do include+=("\"$t\""); done
 [[ -d "$root/tests" ]] && include+=("\"$root/tests\"")
 cat >"$tmp/tsconfig.json" <<EOF
 {
