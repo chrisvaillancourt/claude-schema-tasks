@@ -195,6 +195,50 @@ describe('work budget (R1-3)', () => {
   })
 })
 
+describe('the budget covers comparisons and messages (R2-2)', () => {
+  test('a 6,000-value enum against 70,000 invalid items finishes fast with capped issues', async () => {
+    const schema = { type: 'array', items: { enum: Array.from({ length: 6000 }, (_, i) => i) } }
+    const reply = JSON.stringify(Array(70000).fill(-1))
+    expect(JSON.stringify(schema).length).toBe(28925)
+    expect(reply.length).toBe(210001)
+    expect(ok(schema)).toEqual([])
+    const t0 = Date.now()
+    const r = evaluate(schema, JSON.parse(reply))
+    const ms = Date.now() - t0
+    expect(r.kind).toBe('invalid')
+    if (r.kind === 'invalid') {
+      expect(r.issues.length).toBe(50)
+      expect(r.issues[0]!.message.length).toBeLessThan(200)
+    }
+    expect(ms).toBeLessThan(250)
+  })
+
+  test('deep equality is charged per value compared', async () => {
+    const big = Array(100).fill(0)
+    const copy = (): unknown[] => Array(100).fill(0)
+    expect(evaluate({ const: big }, copy(), { maxWork: 50 }).kind).toBe('limit')
+    expect(evaluate({ const: big }, copy(), { maxWork: 1000 }).kind).toBe('valid')
+    expect(evaluate({ enum: [big] }, copy(), { maxWork: 50 }).kind).toBe('limit')
+    expect(evaluate({ enum: [1, big] }, copy(), { maxWork: 1000 }).kind).toBe('valid')
+  })
+
+  test('scalar enum members are found without comparing each one', async () => {
+    const e = { enum: Array.from({ length: 6000 }, (_, i) => i) }
+    // Once the members are indexed, each lookup costs one unit, not 6,000.
+    expect(evaluate({ type: 'array', items: e }, Array(1000).fill(5999), { maxWork: 10_000 }).kind).toBe('valid')
+    expect(validate(e, '5999').length).toBe(1)
+    expect(validate({ enum: [1, true, null, 'a'] }, 1)).toEqual([])
+    expect(validate({ enum: [1] }, true).length).toBe(1)
+    expect(validate({ enum: [0] }, -0)).toEqual([])
+  })
+
+  test('required names are charged', async () => {
+    const required = Array.from({ length: 100 }, (_, i) => `p${i}`)
+    expect(evaluate({ required }, {}, { maxWork: 50 }).kind).toBe('limit')
+    expect(evaluate({ required }, {}, { maxWork: 1000 }).kind).toBe('invalid')
+  })
+})
+
 describe('string length counts code points (R1-5)', () => {
   test('an astral character is one character', async () => {
     const face = '\u{1F600}'

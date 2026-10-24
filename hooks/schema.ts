@@ -22,8 +22,10 @@ const DEF_KEYS = new Set(['$defs', 'definitions'])
  */
 export const MAX_APPLY_DEPTH = 256
 /**
- * One check of a reply applies at most this many subschemas (about 60 ns each
- * in Bun: tens of milliseconds); past it the check is a limit failure.
+ * One check of a reply spends at most this many work units; past it the check
+ * is a limit failure. A unit is one subschema application, one value visited
+ * by an enum/const equality check, one enum member indexed, or one required
+ * name looked up (tens of nanoseconds each in Bun: well under a second).
  */
 export const MAX_WORK = 1_000_000
 /**
@@ -34,6 +36,8 @@ export const MAX_WORK = 1_000_000
 export const MAX_EXPANSION = 10_000
 /** At most this many issues are collected. */
 const MAX_ISSUES = 50
+/** Enum members named in an issue message. */
+const MAX_SHOWN = 10
 
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v)
 
@@ -289,8 +293,15 @@ const show = (v: unknown) => {
   return s.length > 60 ? `${s.slice(0, 57)}...` : s
 }
 
-/** `work` is shared by every probe of one evaluation. */
-type Ctx = { root: unknown; issues: Issue[]; depth: number; work: { left: number; max: number } }
+/**
+ * `work` and `enums` are shared by every probe of one evaluation. A probe
+ * (`cap` 1) only needs to know whether anything failed, so it builds no
+ * messages.
+ */
+type Ctx = { root: unknown; issues: Issue[]; cap: number; depth: number; work: { left: number; max: number }; enums: Map<unknown[], EnumIndex> }
+
+/** An enum's scalar members in a Set (one lookup), and the rest to compare. */
+type EnumIndex = { scalars: Set<unknown>; others: unknown[] }
 
 /** Thrown when a check can't be completed; it ends the whole evaluation. */
 class Limit {
@@ -309,11 +320,53 @@ function resolve(root: unknown, ref: string): unknown {
   return node
 }
 
-function apply(schema: unknown, value: unknown, path: string, ctx: Ctx) {
-  const add = (message: string, at = path) => {
-    if (ctx.issues.length < MAX_ISSUES) ctx.issues.push({ path: at, message })
+function charge(ctx: Ctx, units: number) {
+  ctx.work.left -= units
+  if (ctx.work.left < 0) throw new Limit(`checking needs more than ${ctx.work.max} units of work (subschema applications and value comparisons)`)
+}
+
+/** deepEqual that charges one unit per value pair it visits. */
+function equal(a: unknown, b: unknown, ctx: Ctx): boolean {
+  charge(ctx, 1)
+  if (a === b) return true
+  if (Array.isArray(a)) return Array.isArray(b) && a.length === b.length && a.every((x, i) => equal(x, b[i], ctx))
+  if (isObject(a) && isObject(b)) {
+    const ka = Object.keys(a)
+    const kb = Object.keys(b)
+    return ka.length === kb.length && ka.every(k => Object.hasOwn(b, k) && equal(a[k], b[k], ctx))
   }
-  if (--ctx.work.left < 0) throw new Limit(`checking needs more than ${ctx.work.max} subschema applications`)
+  return false
+}
+
+const isScalar = (v: unknown) => v === null || typeof v !== 'object'
+
+function inEnum(list: unknown[], value: unknown, ctx: Ctx): boolean {
+  let index = ctx.enums.get(list)
+  if (index === undefined) {
+    charge(ctx, list.length)
+    index = { scalars: new Set(list.filter(isScalar)), others: list.filter(x => !isScalar(x)) }
+    ctx.enums.set(list, index)
+  }
+  // JSON scalars: Set's SameValueZero agrees with === here (no NaN in JSON).
+  if (isScalar(value)) {
+    charge(ctx, 1)
+    return index.scalars.has(value)
+  }
+  return index.others.some(x => equal(x, value, ctx))
+}
+
+function enumMessage(list: unknown[]): string {
+  const shown = list.slice(0, MAX_SHOWN).map(show).join(', ')
+  return list.length > MAX_SHOWN ? `must be one of ${shown}, ... (${list.length} values)` : `must be one of ${shown}`
+}
+
+function apply(schema: unknown, value: unknown, path: string, ctx: Ctx) {
+  // The message is built only while there is room for it.
+  const add = (message: string | (() => string), at = path) => {
+    if (ctx.issues.length >= ctx.cap) return
+    ctx.issues.push({ path: at, message: ctx.cap === 1 ? '' : typeof message === 'string' ? message : message() })
+  }
+  charge(ctx, 1)
   if (schema === true) return
   if (schema === false) return add('no value is allowed here')
   if (!isObject(schema)) return add('schema error: subschema is not an object')
@@ -324,12 +377,10 @@ function apply(schema: unknown, value: unknown, path: string, ctx: Ctx) {
     if (has('$ref')) apply(resolve(ctx.root, String(schema.$ref)), value, path, ctx)
     if (has('type')) {
       const types = (Array.isArray(schema.type) ? schema.type : [schema.type]) as string[]
-      if (!types.some(t => hasType(value, t))) add(`must be ${types.join(' or ')}, got ${typeOf(value)}`)
+      if (!types.some(t => hasType(value, t))) add(() => `must be ${types.join(' or ')}, got ${typeOf(value)}`)
     }
-    if (has('enum') && !(schema.enum as unknown[]).some(x => deepEqual(x, value))) {
-      add(`must be one of ${(schema.enum as unknown[]).map(show).join(', ')}`)
-    }
-    if (has('const') && !deepEqual(schema.const, value)) add(`must be ${show(schema.const)}`)
+    if (has('enum') && !inEnum(schema.enum as unknown[], value, ctx)) add(() => enumMessage(schema.enum as unknown[]))
+    if (has('const') && !equal(schema.const, value, ctx)) add(() => `must be ${show(schema.const)}`)
 
     if (typeof value === 'number') {
       if (has('minimum') && value < (schema.minimum as number)) add(`must be >= ${schema.minimum}`)
@@ -350,6 +401,7 @@ function apply(schema: unknown, value: unknown, path: string, ctx: Ctx) {
     if (isObject(value)) {
       const props = has('properties') ? (schema.properties as Record<string, unknown>) : {}
       if (has('required')) {
+        charge(ctx, (schema.required as string[]).length)
         for (const name of schema.required as string[]) {
           if (!Object.hasOwn(value, name)) add(`missing required property "${name}"`)
         }
@@ -370,7 +422,7 @@ function apply(schema: unknown, value: unknown, path: string, ctx: Ctx) {
       const matches = (list: unknown[], enough: number) => {
         let n = 0
         for (const sub of list) {
-          const probe: Ctx = { root: ctx.root, issues: [], depth: ctx.depth, work: ctx.work }
+          const probe: Ctx = { ...ctx, issues: [], cap: 1 }
           apply(sub, value, path, probe)
           if (probe.issues.length === 0 && ++n >= enough) break
         }
@@ -404,7 +456,7 @@ export type Evaluation =
  */
 export function evaluate(schema: unknown, value: unknown, opts: { maxWork?: number } = {}): Evaluation {
   const max = opts.maxWork ?? MAX_WORK
-  const ctx: Ctx = { root: schema, issues: [], depth: 0, work: { left: max, max } }
+  const ctx: Ctx = { root: schema, issues: [], cap: MAX_ISSUES, depth: 0, work: { left: max, max }, enums: new Map() }
   try {
     apply(schema, value, '', ctx)
   } catch (err) {
