@@ -22,7 +22,7 @@ A contract is one Agent tool call whose prompt is a schema-tasks envelope. Its i
    Both spend the same persisted `repairsUsed`. When it reaches `maxRepairs` the next invalid reply marks the contract `failed` and the child is let go (never `preventContinuation`). A gate pass is recorded, not final.
 4. **`turn.complete` for the child**: the independent final check. `answer` (the delivered report) must parse and validate; that sets `valid` with the data, else `failed`. `aborted` is `cancelled`; `refusal` and `error` are `failed`. A child that never passed a gate is judged here, so ending without a valid answer is a failure, never a success.
 5. **`tool.call` Agent, after `next`**: a `valid` contract returns the native record unchanged plus one `context` line holding the validated JSON; `failed`/`cancelled` answers `{ deny }` with the code and issues. If `turn.complete` has not been seen, the result's own text is validated in its place (a hand-back pointer fails closed). `async_launched` returns the record plus a context line naming `schema_result`.
-6. **`schema_result({ agentId })`** (`mcp__schema-tasks__schema_result`, deferred behind ToolSearch): answers `pending`, `ok` with data, or `failed`/`cancelled` with issues, only to the loop that opened the contract.
+6. **`schema_result({ agent_id })`** (`mcp__schema-tasks__schema_result`, deferred behind ToolSearch): answers `pending`, `ok` with data, or `failed`/`cancelled` with issues, only to the loop that opened the contract.
 
 ## Design invariants of this mod
 

@@ -9,6 +9,24 @@
       "title": "Enabled",
       "description": "Turn the mod on for new sessions. /schema-tasks on|off overrides it for a session.",
       "default": true
+    },
+    "maxRepairs": {
+      "type": "number",
+      "title": "Repairs",
+      "description": "How many times an invalid subagent reply is sent back with its problems (0 to 5). Each repair is one more subagent request.",
+      "default": 3
+    },
+    "maxSchemaBytes": {
+      "type": "number",
+      "title": "Largest schema (bytes)",
+      "description": "Largest JSON Schema accepted in an envelope, as JSON text (256 to 262144).",
+      "default": 32768
+    },
+    "maxResultBytes": {
+      "type": "number",
+      "title": "Largest reply (bytes)",
+      "description": "Largest subagent reply accepted, in UTF-8 bytes (1024 to 4194304); a longer one is invalid.",
+      "default": 262144
     }
   },
   "author": {

@@ -37,7 +37,7 @@ Claude Code's Workflow tool already checks a `schema` per agent. This mod covers
 
 A subagent that ends without ever producing a valid answer is a failure, never a success.
 
-**Background subagents.** With `run_in_background`, the Agent call returns at once with a note to call `mcp__schema-tasks__schema_result({ "agentId": "<id>" })` after the subagent finishes. That tool answers `pending`, `ok` with the data, or `failed`/`cancelled` with the problems, and only to the conversation (main loop or subagent) that started the contract. The engine's own completion notice still carries the raw report: treat `schema_result` as the result.
+**Background subagents.** With `run_in_background`, the Agent call returns at once with a note to call `mcp__schema-tasks__schema_result({ "agent_id": "<id>" })` after the subagent finishes. That tool answers `pending`, `ok` with the data, or `failed`/`cancelled` with the problems, and only to the conversation (main loop or subagent) that started the contract. The engine's own completion notice still carries the raw report: treat `schema_result` as the result.
 
 **Nested delegation.** A subagent can delegate with its own envelope; each contract belongs to the loop that made the call.
 
