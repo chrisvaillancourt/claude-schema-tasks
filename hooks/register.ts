@@ -213,6 +213,6 @@ export const register: Register = (on, options) => {
     if (typeof agentId !== 'string') return { deny: 'schema_result needs agent_id, the subagent\'s agent id.' }
     const answer = resultFor(await read($, contractsAtom), agentId, e.agentId ?? null)
     if (answer === null) return { deny: `No contract for agent ${agentId} was started by this conversation.` }
-    return { result: answer }
+    return { result: JSON.stringify(answer) }
   }).catch(() => ({ deny: 'schema_result failed; no result is available.' }))
 }

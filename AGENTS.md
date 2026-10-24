@@ -37,6 +37,8 @@ A contract is one Agent tool call whose prompt is a schema-tasks envelope. Its i
 
 - A managed plugin seated above (prepend tier) can send `classic.*` events on past this mod; on the machine this was built on `classic.SubagentStop` never reached it. The SubagentStop gate is therefore covered by the test kit only; the hand-back gate and `turn.complete` were verified live.
 - Where children report through `SubagentHandback`, the Agent tool's result is only a pointer and the report reaches the parent as a separate message. Denying the hand-back call re-prompts the child each time (checked with two denials in a row). `turn.complete`'s `answer` is the delivered report.
+- A `$.tool.register` tool's `{ result }` must be a string or a content-block list: an object was refused live ("does not match its output shape") although the test kit accepted it. `schema_result` answers JSON text.
+- The main model may launch an Agent call in the background on its own (`async_launched`) even when the prompt didn't ask for it, so the `schema_result` path is not rare.
 
 ## Commands
 
