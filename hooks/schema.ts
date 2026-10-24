@@ -21,6 +21,17 @@ const DEF_KEYS = new Set(['$defs', 'definitions'])
  * whose in-place chain alone is longer.
  */
 export const MAX_APPLY_DEPTH = 256
+/**
+ * One check of a reply applies at most this many subschemas (about 60 ns each
+ * in Bun: tens of milliseconds); past it the check is a limit failure.
+ */
+export const MAX_WORK = 1_000_000
+/**
+ * checkSchema refuses a schema that, ignoring early exits, would apply more
+ * than this many subschemas to one value before moving into the data (shared
+ * $ref/allOf/anyOf/oneOf branches multiply).
+ */
+export const MAX_EXPANSION = 10_000
 /** At most this many issues are collected. */
 const MAX_ISSUES = 50
 
@@ -199,19 +210,30 @@ export function checkSchema(schema: unknown, limits: SchemaLimits): Issue[] {
   }
 
   // The graph of in-place edges is acyclic now. Its longest chain is the
-  // depth validation needs before it moves into the data at all.
-  const chain = new Map<string, number>()
-  const longest = (node: string): number => {
-    const known = chain.get(node)
+  // depth validation needs before it moves into the data at all; its
+  // expansion is how many subschemas one value can cost.
+  const cost = new Map<string, { chain: number; expansion: number }>()
+  const measure = (node: string): { chain: number; expansion: number } => {
+    const known = cost.get(node)
     if (known !== undefined) return known
-    let n = 1
-    for (const next of w.inPlace.get(node) ?? []) n = Math.max(n, 1 + longest(next))
-    chain.set(node, n)
-    return n
+    let chain = 1
+    let expansion = 1
+    for (const next of w.inPlace.get(node) ?? []) {
+      const m = measure(next)
+      chain = Math.max(chain, 1 + m.chain)
+      expansion = Math.min(MAX_EXPANSION + 1, expansion + m.expansion)
+    }
+    const r = { chain, expansion }
+    cost.set(node, r)
+    return r
   }
   for (const node of w.nodes.keys()) {
-    if (longest(node) > MAX_APPLY_DEPTH) {
+    const m = measure(node)
+    if (m.chain > MAX_APPLY_DEPTH) {
       return [{ path: node, message: `the schema has a $ref/allOf/anyOf/oneOf chain more than ${MAX_APPLY_DEPTH} steps long` }]
+    }
+    if (m.expansion > MAX_EXPANSION) {
+      return [{ path: node, message: `the schema expands to more than ${MAX_EXPANSION} subschema checks for one value (shared $ref/allOf/anyOf/oneOf branches multiply)` }]
     }
   }
   return []
@@ -250,7 +272,8 @@ const show = (v: unknown) => {
   return s.length > 60 ? `${s.slice(0, 57)}...` : s
 }
 
-type Ctx = { root: unknown; issues: Issue[]; depth: number }
+/** `work` is shared by every probe of one evaluation. */
+type Ctx = { root: unknown; issues: Issue[]; depth: number; work: { left: number; max: number } }
 
 /** Thrown when a check can't be completed; it ends the whole evaluation. */
 class Limit {
@@ -273,6 +296,7 @@ function apply(schema: unknown, value: unknown, path: string, ctx: Ctx) {
   const add = (message: string, at = path) => {
     if (ctx.issues.length < MAX_ISSUES) ctx.issues.push({ path: at, message })
   }
+  if (--ctx.work.left < 0) throw new Limit(`checking needs more than ${ctx.work.max} subschema applications`)
   if (schema === true) return
   if (schema === false) return add('no value is allowed here')
   if (!isObject(schema)) return add('schema error: subschema is not an object')
@@ -323,18 +347,25 @@ function apply(schema: unknown, value: unknown, path: string, ctx: Ctx) {
     }
     if (has('allOf')) for (const sub of schema.allOf as unknown[]) apply(sub, value, path, ctx)
     if (has('anyOf') || has('oneOf')) {
-      const matches = (list: unknown[]) =>
-        list.filter(sub => {
-          const probe: Ctx = { root: ctx.root, issues: [], depth: ctx.depth }
+      // Counts matching options, stopping once `enough` match. A limit inside
+      // a probe throws through: it is never read as a non-match.
+      const matches = (list: unknown[], enough: number) => {
+        let n = 0
+        for (const sub of list) {
+          const probe: Ctx = { root: ctx.root, issues: [], depth: ctx.depth, work: ctx.work }
           apply(sub, value, path, probe)
-          return probe.issues.length === 0
-        }).length
-      if (has('anyOf') && matches(schema.anyOf as unknown[]) === 0) {
+          if (probe.issues.length === 0 && ++n >= enough) break
+        }
+        return n
+      }
+      if (has('anyOf') && matches(schema.anyOf as unknown[], 1) === 0) {
         add(`must match at least one of the ${(schema.anyOf as unknown[]).length} anyOf options`)
       }
       if (has('oneOf')) {
-        const n = matches(schema.oneOf as unknown[])
-        if (n !== 1) add(`must match exactly one oneOf option; matches ${n} of ${(schema.oneOf as unknown[]).length}`)
+        const total = (schema.oneOf as unknown[]).length
+        const n = matches(schema.oneOf as unknown[], 2)
+        if (n === 0) add(`must match exactly one oneOf option; matches none of ${total}`)
+        else if (n > 1) add(`must match exactly one oneOf option; matches more than one of ${total}`)
       }
     }
   } finally {
@@ -353,8 +384,9 @@ export type Evaluation =
  * each with a JSON Pointer path), or a limit when the check couldn't finish
  * (anywhere, inside anyOf/oneOf included). Assumes `checkSchema` passed.
  */
-export function evaluate(schema: unknown, value: unknown): Evaluation {
-  const ctx: Ctx = { root: schema, issues: [], depth: 0 }
+export function evaluate(schema: unknown, value: unknown, opts: { maxWork?: number } = {}): Evaluation {
+  const max = opts.maxWork ?? MAX_WORK
+  const ctx: Ctx = { root: schema, issues: [], depth: 0, work: { left: max, max } }
   try {
     apply(schema, value, '', ctx)
   } catch (err) {

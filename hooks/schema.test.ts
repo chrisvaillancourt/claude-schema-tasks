@@ -117,7 +117,7 @@ describe('validate', () => {
     expect(paths(validate(any, true))).toEqual([''])
     const one = { oneOf: [{ type: 'number' }, { type: 'integer' }] }
     expect(validate(one, 1.5)).toEqual([])
-    expect(validate(one, 2)[0]!.message).toContain('2 of')
+    expect(validate(one, 2)[0]!.message).toContain('more than one of 2')
     expect(paths(validate({ allOf: [{ type: 'number' }, { minimum: 3 }] }, 2))).toEqual([''])
     expect(paths(validate({ properties: { a: false } }, { a: 1 }))).toEqual(['/a'])
   })
@@ -160,5 +160,37 @@ describe('resource limits (R1-2)', () => {
     expect(pre.length).toBe(1)
     expect(pre[0]!.message).toContain('chain')
     expect(evaluate(chain, 42).kind).toBe('limit')
+  })
+})
+
+describe('work budget (R1-3)', () => {
+  // The reviewer's 1,562-byte schema: each level is anyOf of two references
+  // to the level below, so a value that fails every branch costs 2^24 checks.
+  const dag = () => {
+    const $defs: Record<string, unknown> = { n0: { type: 'number' } }
+    for (let i = 1; i <= 24; i++) $defs[`n${i}`] = { anyOf: [{ $ref: `#/$defs/n${i - 1}` }, { $ref: `#/$defs/n${i - 1}` }] }
+    return { $ref: '#/$defs/n24', $defs }
+  }
+
+  test('a schema that expands too far per value is refused before the child starts', async () => {
+    const s = dag()
+    expect(JSON.stringify(s).length).toBe(1562)
+    const pre = ok(s)
+    expect(pre.length).toBe(1)
+    expect(pre[0]!.message).toContain('expands')
+  })
+
+  test('at run time the budget ends the check as a limit; anyOf stops at its first match', async () => {
+    const s = dag()
+    expect(evaluate(s, 1)).toEqual({ kind: 'valid' })
+    expect(evaluate(s, 'x').kind).toBe('limit')
+  })
+
+  test('the budget counts every application, across the whole value', async () => {
+    const s = { type: 'array', items: {} }
+    expect(evaluate(s, Array(100).fill(0), { maxWork: 50 }).kind).toBe('limit')
+    expect(evaluate(s, Array(100).fill(0), { maxWork: 1000 }).kind).toBe('valid')
+    expect(evaluate({ anyOf: [{}, { allOf: [{}, {}, {}, {}] }] }, 1, { maxWork: 3 }).kind).toBe('valid')
+    expect(evaluate({ oneOf: [{}, {}, { allOf: [{}, {}, {}, {}] }] }, 1, { maxWork: 4 }).kind).toBe('invalid')
   })
 })

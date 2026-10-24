@@ -340,3 +340,12 @@ describe('validation limits are failures of their own (R1-2)', () => {
     expect(r.contracts[0]!.failure!.code).toBe('validation-limit')
   })
 })
+
+describe('a reply too big to check is a validation limit (R1-3)', () => {
+  test('past the work budget the contract fails as validation-limit', async () => {
+    const schema = { type: 'array', items: { allOf: [{}, {}] } }
+    const answer = JSON.stringify(Array(400000).fill(0))
+    const r = transition([running({ schema, maxResultBytes: 4194304 })], { kind: 'complete', agentId: 'a1', reason: 'answer', answer, enabled: true })
+    expect(r.contracts[0]!.failure?.code).toBe('validation-limit')
+  })
+})
