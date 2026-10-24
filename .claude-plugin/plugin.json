@@ -1,0 +1,18 @@
+{
+  "name": "schema-tasks",
+  "version": "0.1.0",
+  "description": "Delegate to a subagent with a JSON Schema and get back a validated result",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "enabled": {
+      "type": "boolean",
+      "title": "Enabled",
+      "description": "Turn the mod on for new sessions. /schema-tasks on|off overrides it for a session.",
+      "default": true
+    }
+  },
+  "author": {
+    "name": "Chris Vaillancourt"
+  },
+  "license": "MIT"
+}
