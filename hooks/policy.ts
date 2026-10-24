@@ -247,7 +247,7 @@ function validText(c: Contract): string {
 }
 
 function pendingText(c: Contract): string {
-  return `schema-tasks: contract ${c.id} is pending. When agent ${c.agentId} has finished, call ${TOOL_ID}({"agent_id": "${c.agentId}"}) for the validated result; its own completion notice is not checked.`
+  return `schema-tasks: contract ${c.id} is pending. When agent ${c.agentId} has finished, call ${TOOL_ID}({"agent_id": "${c.agentId}"}) for the validated result; its completion notice and report are not the result.`
 }
 
 /** Applies one event; `action` says what the hook does with the engine event. */
@@ -337,6 +337,30 @@ export function transition(list: Contract[], ev: ContractEvent): Step {
       return { contracts: replace(list, done), action }
     }
   }
+}
+
+// ---------------------------------------------------------------- deliveries
+
+const TASK_ID = /<task-id>([^<\s]+)<\/task-id>/
+const MESSAGE_FROM = /<agent-message from="([^"\s]+)"/
+
+/**
+ * The note to add to a row that delivers a background child's report or its
+ * completion notice to the loop that opened the contract (the engine's
+ * `<task-notification>`, or the hand-back's `<agent-message from=...>`), or
+ * null for every other row. Foreground contracts are answered on the Agent
+ * result instead.
+ */
+export function deliveryNote(list: Contract[], text: string, rowAgentId: string | null): string | null {
+  const id = text.includes('<task-notification>') ? TASK_ID.exec(text)?.[1] : MESSAGE_FROM.exec(text)?.[1]
+  if (id === undefined) return null
+  const c = [...list].reverse().find(x => x.agentId === id)
+  if (!c || !c.background || c.parentAgentId !== rowAgentId) return null
+  if (text.includes(`schema-tasks: contract ${c.id}`)) return null
+  if (c.phase === 'valid') return validText(c)
+  if (isFinal(c)) return failureText(c)
+  const gate = c.gatePassed ? 'it passed the hand-back check, but the final check runs when the subagent ends' : 'it has not been checked yet'
+  return `schema-tasks: contract ${c.id}: this report is not a validated result (${gate}). Call ${TOOL_ID}({"agent_id": "${id}"}) for the result.`
 }
 
 // ---------------------------------------------------------------- reading

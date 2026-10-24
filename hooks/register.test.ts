@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'claude-code/testing'
+import { describe, expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
 const COMMAND = { origin: { kind: 'composer' as const }, presentation: { isFullscreen: false, columns: 120 } }
@@ -34,6 +34,7 @@ function world(on: On, T: any, w: World) {
   on('classic.SubagentStop', () => ({}))
   on('ui.log', () => ({ value: undefined }))
   on('turn.complete', ($, e) => ({ text: e.answer }))
+  mock.session(on)
   on('tool.call', async ($, e) => {
     if (String(e.tool) === 'SubagentHandback') {
       w.handbacks.push(String((e as any).message))
@@ -228,6 +229,49 @@ describe('schema-tasks', () => {
     expect(JSON.parse(done.result as string)).toEqual({ status: 'ok', data: { verdict: 'pass' } })
     const other = await $.tool.call({ tool: TOOL, agent_id: 'a1', agentId: 'intruder' } as any)
     expect(String(other.deny ?? other.text)).toContain('No contract')
+  })
+
+  test('background (R1-4): the completion notice and the hand-back delivery carry the contract status', async ($, on) => {
+    const w = fresh(async () => null, { background: true })
+    world(on, $, w)
+    await start($)
+    await agent($, ENVELOPE)
+    const notice = (id: string) =>
+      `<system-reminder>\n<task-notification>\n<task-id>${id}</task-id>\n<status>completed</status>\n<summary>Agent "judge" finished</summary>\n<result>REVIEW COMPLETE: PASS</result>\n</task-notification>\n</system-reminder>`
+    const row = (text: string, door = 'delivery', origin: any = { kind: 'task-notification' }) =>
+      $.session.append({ door, origin, uuid: `u-${Math.random()}`, message: { type: 'attachment', name: 'queued_command', role: 'user', content: [{ type: 'text', text }] } } as any)
+    const textOf = (r: any) => r.message.content.map((b: any) => b.text).join('')
+
+    // the hand-back delivery, after the repairs ran out
+    for (let i = 0; i < 4; i++) await handback($, 'a1', 'REVIEW COMPLETE: PASS')
+    const delivered = await row('Another Claude session sent a message:\n<agent-message from="a1">\nREVIEW COMPLETE: PASS\n</agent-message>', 'prompt', { kind: 'peer' })
+    expect(textOf(delivered)).toContain('repairs-exhausted')
+    expect(textOf(delivered)).toContain('not a valid result')
+
+    await $.turn.complete({ agentId: 'a1', turnId: 't', reason: 'answer', answer: 'REVIEW COMPLETE: PASS', durationMs: 1, isAborted: false })
+    const failed = await row(notice('a1'))
+    expect(textOf(failed)).toContain('<status>completed</status>')
+    expect(textOf(failed)).toContain('schema-tasks: contract')
+    expect(textOf(failed)).toContain('not a valid result')
+
+    // an unrelated task's notice is left alone
+    const other = await row(notice('zz'))
+    expect(textOf(other)).toBe(notice('zz'))
+  })
+
+  test('background (R1-4): a valid contract\'s notice carries the validated JSON', async ($, on) => {
+    const w = fresh(async () => null, { background: true })
+    world(on, $, w)
+    await start($)
+    await agent($, ENVELOPE)
+    await $.turn.complete({ agentId: 'a1', turnId: 't', reason: 'answer', answer: '{"verdict":"pass"}', durationMs: 1, isAborted: false })
+    const r = await $.session.append({
+      door: 'delivery', origin: { kind: 'task-notification' }, uuid: 'u1',
+      message: { type: 'attachment', name: 'queued_command', role: 'user', content: [{ type: 'text', text: '<task-notification>\n<task-id>a1</task-id>\n</task-notification>' }] },
+    } as any)
+    const text = (r as any).message.content.map((b: any) => b.text).join('')
+    expect(text).toContain('passed')
+    expect(text).toContain('{"verdict":"pass"}')
   })
 
   test('nested: a subagent\'s envelope is its own contract', async ($, on) => {

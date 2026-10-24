@@ -9,6 +9,7 @@ import {
   USAGE,
   childPrompt,
   configFrom,
+  deliveryNote,
   isActive,
   newContract,
   parseArgs,
@@ -207,6 +208,24 @@ export const register: Register = (on, options) => {
     }
     return next(e)
   })
+
+  // A background child's report and completion notice reach its parent as
+  // rows of their own; each gets the contract's status, so the raw report
+  // never stands alone as a result.
+  on('session.append', async ($, e, next) => {
+    if (e.door === 'queue') return next(e)
+    const m = e.message
+    if (m.type !== 'user' && m.type !== 'attachment') return next(e)
+    const last = m.content.findLastIndex(b => b.type === 'text')
+    const block = m.content[last]
+    const text = block?.type === 'text' ? (block as { text?: unknown }).text : undefined
+    if (typeof text !== 'string') return next(e)
+    if (!text.includes('<task-notification>') && !text.includes('<agent-message from=')) return next(e)
+    const note = deliveryNote(await read($, contractsAtom), text, e.agentId ?? null)
+    if (note === null) return next(e)
+    const content = m.content.map((b, i) => (i === last ? { ...b, text: `${text}\n\n${note}` } : b))
+    return next({ ...e, message: { ...m, content } })
+  }).catch(($, e, next) => next(e)) // fail open: schema_result stays authoritative
 
   on('tool.call', { tool: 'mcp__schema-tasks__schema_result' }, async ($, e) => {
     const agentId = (e as { agent_id?: unknown }).agent_id

@@ -1,6 +1,6 @@
 # schema-tasks
 
-A Claude Code mod (function-hook plugin) for schema-checked delegation. When Claude hands a subagent a JSON Schema through the plain Agent tool, it gets back either JSON that validates against that schema or an explicit failure with the problems listed, never prose that only looks like a result. The subagent is told what is wrong and gets a bounded number of chances to fix its answer before it finishes.
+A Claude Code mod (function-hook plugin) for schema-checked delegation. When Claude hands a subagent a JSON Schema through the plain Agent tool, the Agent call is answered with JSON that validates against that schema or with an explicit failure listing the problems. For a subagent in the background, that answer comes from the `schema_result` tool; the engine's completion notice and the subagent's delivered report are marked with the same status where the mod gets to see them, but they are not the result. All of this holds only while the mod's hooks run: a plugin seated above can skip them (see Limitations). The subagent is told what is wrong and gets a bounded number of chances to fix its answer before it finishes.
 
 Claude Code's Workflow tool already checks a `schema` per agent. This mod covers the Agent tool, from the main conversation and from subagents, and leaves Workflow alone.
 
@@ -38,7 +38,7 @@ Claude Code's Workflow tool already checks a `schema` per agent. This mod covers
 
 A subagent that ends without ever producing a valid answer is a failure, never a success.
 
-**Background subagents.** With `run_in_background`, the Agent call returns at once with a note to call `mcp__schema-tasks__schema_result({ "agent_id": "<id>" })` after the subagent finishes. That tool answers JSON text: `pending`, `ok` with the data, or `failed`/`cancelled` with the problems, and only to the conversation (main loop or subagent) that started the contract (verified live). The main model may background an Agent call on its own, so this path is not rare. The engine's own completion notice still carries the raw report: treat `schema_result` as the result.
+**Background subagents.** With `run_in_background`, the Agent call returns at once with a note to call `mcp__schema-tasks__schema_result({ "agent_id": "<id>" })` after the subagent finishes. That tool answers JSON text: `pending`, `ok` with the data, or `failed`/`cancelled` with the problems, and only to the conversation (main loop or subagent) that started the contract (verified live). The main model may background an Agent call on its own, so this path is not rare. The engine's completion notice and the subagent's delivered report (its hand-back message) still carry the raw report; the mod adds the contract's status after each (`schema-tasks: contract … failed (code)` with the problems, `passed` with the validated JSON, or a note that the report is not a validated result yet). **Verified live** on Claude Code 2.1.310 with a background subagent that kept sending prose: both rows reached the parent with the `repairs-exhausted` line. Treat `schema_result` as the result: a plugin seated above can skip the hook that adds the status (seen live for one row), and the notice can arrive before the final check.
 
 **Nested delegation.** A subagent can delegate with its own envelope; each contract belongs to the loop that made the call.
 
@@ -80,7 +80,7 @@ The mod makes no model calls of its own. Its costs are:
 - No `pattern` or `format`, no JSON Type Definition, no schema inheritance from agent definitions.
 - The `SubagentStop` gate is not verified live (see above). Where neither gate fires, the final check still holds: an invalid answer is a failure, but the subagent gets no chance to repair it.
 - The child is bound by the `agentId` its spawn resolves. If a gate event ever arrived before that binding, the gate would pass it by; the final check then fails closed.
-- With a background subagent, the engine's completion notice carries the subagent's raw report, which this mod cannot mark; only `schema_result` says whether it validated.
+- With a background subagent, the completion notice and the delivered report carry the subagent's raw report; the status the mod adds after them is best effort (a plugin seated above can skip it). Only `schema_result` is authoritative.
 - Contracts live in session state: at most 16 are kept (the oldest finished go first), they survive a hot reload, and a `/clear` or a restart forgets them.
 - The teaching paragraph is in every agent's Agent description, and `schema_result` is listed for subagents too; a subagent has been seen calling it by mistake (it answers with an error and does no harm).
 - A plugin seated above this one can skip any of its hooks. A skipped pre-check means an envelope runs as an ordinary prompt with no contract; the mod cannot detect that.
