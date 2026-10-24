@@ -33,7 +33,8 @@ Claude Code's Workflow tool already checks a `schema` per agent. This mod covers
 **When it ends.** The answer the subagent delivered is checked again on its own, whatever happened before (verified live, as is the parent's note or failure below). Then:
 
 - valid: the Agent result is returned as usual, plus a note to Claude holding the validated JSON;
-- invalid after the last repair, interrupted, refused or errored: the Agent call is answered with an explicit failure (code and problems). The subagent's own report, if it was delivered separately, is named as not a valid result.
+- invalid after the last repair, interrupted, refused or errored: the Agent call is answered with an explicit failure (code and problems).
+- the check could not be completed (`validation-limit`): the answer or the schema needed more than 256 nested steps to check. This is a failure of its own, never read as "doesn't match" (inside `anyOf`/`oneOf` too), and it is not sent back for repair. The subagent's own report, if it was delivered separately, is named as not a valid result.
 
 A subagent that ends without ever producing a valid answer is a failure, never a success.
 
@@ -45,7 +46,7 @@ A subagent that ends without ever producing a valid answer is a failure, never a
 
 `type` (one or a list of `object`, `array`, `string`, `number`, `integer`, `boolean`, `null`), `properties`, `required`, `additionalProperties` (boolean or schema), `items` (one schema), `enum`, `const`, `minimum`, `maximum`, `exclusiveMinimum`, `exclusiveMaximum` (numbers), `minLength`, `maxLength`, `minItems`, `maxItems`, `anyOf`, `oneOf`, `allOf`, and `$ref` to a place in the same schema (`#`, `#/$defs/name`, `#/definitions/name`, any JSON Pointer to a subschema). Annotations are allowed and ignored: `$schema`, `$comment`, `title`, `description`, `default`, `examples`, `deprecated`, `readOnly`, `writeOnly`, `$defs`, `definitions`. Boolean subschemas (`true`, `false`) work; the root must be an object.
 
-Anything else is refused before the subagent starts, never ignored: `pattern`, `format`, `patternProperties`, `uniqueItems`, `not`, `if`/`then`/`else`, tuple `items`, `$id`, remote `$ref`, and the rest. So is a schema over `maxSchemaBytes`, nested deeper than 32 levels, with more than 2,000 subschemas, with a `$ref`/`allOf`/`anyOf`/`oneOf` loop that never moves into the data, or holding a number out of range for JSON (`1e400`). String lengths count UTF-16 code units, as JavaScript does.
+Anything else is refused before the subagent starts, never ignored: `pattern`, `format`, `patternProperties`, `uniqueItems`, `not`, `if`/`then`/`else`, tuple `items`, `$id`, remote `$ref`, and the rest. So is a schema over `maxSchemaBytes`, nested deeper than 32 levels, with more than 2,000 subschemas, with a `$ref`/`allOf`/`anyOf`/`oneOf` loop that never moves into the data or a chain of them more than 256 steps long, or holding a number out of range for JSON (`1e400`). String lengths count UTF-16 code units, as JavaScript does.
 
 ## Command
 

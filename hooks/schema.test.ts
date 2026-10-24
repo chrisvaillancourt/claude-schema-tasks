@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { checkSchema, roundTrips, validate } from './schema'
+import { checkSchema, evaluate, roundTrips, validate } from './schema'
 
 const LIMITS = { maxBytes: 32768, maxDepth: 32, maxNodes: 2000 }
 const ok = (s: unknown) => checkSchema(s, LIMITS)
@@ -135,5 +135,30 @@ describe('round trip (R1-1)', () => {
     expect(roundTrips({ n: Infinity })).toBe(false)
     expect(roundTrips([NaN])).toBe(false)
     expect(roundTrips({ u: undefined })).toBe(false)
+  })
+})
+
+describe('resource limits (R1-2)', () => {
+  // Both oneOf options accept any array, so oneOf must reject: a branch that
+  // runs out of depth is "couldn't check", never "doesn't match".
+  const LIST = { oneOf: [true, { $ref: '#/$defs/list' }], $defs: { list: { type: 'array', items: { $ref: '#/$defs/list' } } } }
+  const nested = (n: number) => JSON.parse('['.repeat(n) + ']'.repeat(n))
+
+  test('depth exhaustion inside oneOf is a limit, not a match decision', async () => {
+    expect(ok(LIST)).toEqual([])
+    expect(evaluate(LIST, nested(3)).kind).toBe('invalid')
+    const deep = evaluate(LIST, nested(300))
+    expect(deep.kind).toBe('limit')
+    expect(validate(LIST, nested(300)).length).toBeGreaterThan(0)
+  })
+
+  test('the reviewer\'s $ref chain is refused before the child starts, and is a limit at run time', async () => {
+    const defs: Record<string, unknown> = { n260: {} }
+    for (let i = 259; i >= 0; i--) defs[`n${i}`] = { $ref: `#/$defs/n${i + 1}` }
+    const chain = { oneOf: [true, { $ref: '#/$defs/n0' }], $defs: defs }
+    const pre = ok(chain)
+    expect(pre.length).toBe(1)
+    expect(pre[0]!.message).toContain('chain')
+    expect(evaluate(chain, 42).kind).toBe('limit')
   })
 })

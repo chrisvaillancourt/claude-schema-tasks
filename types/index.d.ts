@@ -26,6 +26,8 @@ export type Phase = 'starting' | 'running' | 'valid' | 'failed' | 'cancelled'
 export type FailureCode =
   | 'repairs-exhausted'
   | 'final-invalid'
+  /** The validator hit a depth or work limit: the answer could not be checked. */
+  | 'validation-limit'
   | 'handback-withheld'
   | 'aborted'
   | 'refusal'

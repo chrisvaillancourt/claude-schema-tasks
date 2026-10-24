@@ -1,6 +1,6 @@
 // Pure decisions: no `$`, no I/O. register.ts turns engine events into the
 // events of `transition` and carries out the action it returns.
-import { checkSchema, nonFinitePath, roundTrips, utf8Length, validate } from './schema'
+import { checkSchema, evaluate, nonFinitePath, roundTrips, utf8Length } from './schema'
 import type { Config, Contract, Failure, FailureCode, Gate, Issue, Mode, Phase, Session } from '../types'
 
 export const INITIAL: Session = { mode: null }
@@ -137,7 +137,8 @@ export function childPrompt(c: Contract): string {
 
 // ---------------------------------------------------------------- replies
 
-export type Judged = { ok: true; value: unknown } | { ok: false; issues: Issue[] }
+/** `limit`: the check could not be completed; final, never repaired. */
+export type Judged = { ok: true; value: unknown } | { ok: false; issues: Issue[]; limit?: true }
 
 /** Strict: the whole reply, trimmed, is one JSON value. */
 export function parseReply(text: string, maxBytes: number): Judged {
@@ -161,8 +162,9 @@ export function parseReply(text: string, maxBytes: number): Judged {
 export function judge(c: Contract, text: string): Judged {
   const parsed = parseReply(text, c.maxResultBytes)
   if (!parsed.ok) return parsed
-  const issues = validate(c.schema, parsed.value)
-  if (issues.length > 0) return { ok: false, issues }
+  const r = evaluate(c.schema, parsed.value)
+  if (r.kind === 'limit') return { ok: false, limit: true, issues: [{ path: '', message: r.message }] }
+  if (r.kind === 'invalid') return { ok: false, issues: r.issues }
   // What is stored and published must be exactly what was validated.
   if (!roundTrips(parsed.value)) return { ok: false, issues: [{ path: '', message: 'the value does not survive being written back as JSON' }] }
   return parsed
@@ -213,6 +215,7 @@ export type Action =
 type Step = { contracts: Contract[]; action: Action }
 
 const PASS: Action = { kind: 'pass' }
+const LIMIT_MESSAGE = 'the answer could not be checked against the schema within the validator\'s limits'
 
 function fail(c: Contract, code: FailureCode, message: string, issues: Issue[] = []): Contract {
   const failure: Failure = { code, message, issues: issues.slice(0, MAX_LISTED) }
@@ -278,6 +281,7 @@ export function transition(list: Contract[], ev: ContractEvent): Step {
       if (ev.gate === 'stop' && c.gate === 'handback') return { contracts: list, action: PASS }
       const j = judge(c, ev.text)
       if (j.ok) return { contracts: replace(list, { ...c, gate: ev.gate, gatePassed: true, lastIssues: [] }), action: PASS }
+      if (j.limit) return { contracts: replace(list, fail({ ...c, gate: ev.gate }, 'validation-limit', LIMIT_MESSAGE, j.issues)), action: PASS }
       if (c.repairsUsed >= c.maxRepairs) {
         const failed = fail({ ...c, gate: ev.gate }, 'repairs-exhausted', `the reply was still invalid after ${c.maxRepairs} repair${c.maxRepairs === 1 ? '' : 's'}`, j.issues)
         return { contracts: replace(list, failed), action: PASS }
@@ -296,7 +300,11 @@ export function transition(list: Contract[], ev: ContractEvent): Step {
       if (ev.reason === 'error') return { contracts: replace(list, fail(c, 'error', 'an API error ended the subagent')), action: PASS }
       if (!ev.enabled) return { contracts: replace(list, fail(c, 'disabled', 'schema-tasks was turned off while the subagent ran')), action: PASS }
       const j = judge(c, ev.answer)
-      const next = j.ok ? succeed(c, j.value) : fail(c, 'final-invalid', 'the answer the subagent delivered does not validate', j.issues)
+      const next = j.ok
+        ? succeed(c, j.value)
+        : j.limit
+          ? fail(c, 'validation-limit', LIMIT_MESSAGE, j.issues)
+          : fail(c, 'final-invalid', 'the answer the subagent delivered does not validate', j.issues)
       return { contracts: replace(list, next), action: PASS }
     }
     case 'agentResult': {
@@ -318,7 +326,11 @@ export function transition(list: Contract[], ev: ContractEvent): Step {
           done = fail(c, 'handback-withheld', `the hand-back was ${o.handback} by a security review`)
         } else {
           const j = judge(c, o.text)
-          done = j.ok ? succeed(c, j.value) : fail(c, 'final-invalid', 'the Agent result does not validate (no checked answer was seen)', j.issues)
+          done = j.ok
+            ? succeed(c, j.value)
+            : j.limit
+              ? fail(c, 'validation-limit', LIMIT_MESSAGE, j.issues)
+              : fail(c, 'final-invalid', 'the Agent result does not validate (no checked answer was seen)', j.issues)
         }
       }
       const action: Action = done.phase === 'valid' ? { kind: 'context', text: validText(done) } : { kind: 'deny', text: failureText(done) }

@@ -323,3 +323,20 @@ describe('numbers JSON cannot hold (R1-1)', () => {
     expect(JSON.parse(JSON.stringify(r.ok ? r.value : null))).toEqual({ n: 0 })
   })
 })
+
+describe('validation limits are failures of their own (R1-2)', () => {
+  const LIST = { oneOf: [true, { $ref: '#/$defs/list' }], $defs: { list: { type: 'array', items: { $ref: '#/$defs/list' } } } }
+  const deep = '['.repeat(300) + ']'.repeat(300)
+
+  test('the final check fails with validation-limit', async () => {
+    const r = transition([running({ schema: LIST })], { kind: 'complete', agentId: 'a1', reason: 'answer', answer: deep, enabled: true })
+    expect(r.contracts[0]!).toMatchObject({ phase: 'failed', hasData: false })
+    expect(r.contracts[0]!.failure!.code).toBe('validation-limit')
+  })
+
+  test('a gate fails the contract at once instead of asking for a repair', async () => {
+    const r = transition([running({ schema: LIST })], { kind: 'reply', agentId: 'a1', gate: 'handback', text: deep, enabled: true })
+    expect(r.action).toEqual({ kind: 'pass' })
+    expect(r.contracts[0]!.failure!.code).toBe('validation-limit')
+  })
+})

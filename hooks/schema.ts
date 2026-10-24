@@ -15,8 +15,12 @@ const COUNT_KEYS = new Set(['minLength', 'maxLength', 'minItems', 'maxItems'])
 const LIST_KEYS = new Set(['anyOf', 'oneOf', 'allOf'])
 const DEF_KEYS = new Set(['$defs', 'definitions'])
 
-/** Validation stops descending past this many nested applications. */
-const MAX_APPLY_DEPTH = 256
+/**
+ * Validation gives up past this many nested applications: the whole check is
+ * then a limit failure, never a "doesn't match". checkSchema refuses a schema
+ * whose in-place chain alone is longer.
+ */
+export const MAX_APPLY_DEPTH = 256
 /** At most this many issues are collected. */
 const MAX_ISSUES = 50
 
@@ -193,6 +197,23 @@ export function checkSchema(schema: unknown, limits: SchemaLimits): Issue[] {
     const found = visit(node)
     if (found !== null) return [{ path: found, message: 'the schema has a $ref/allOf/anyOf/oneOf loop that never moves into the data' }]
   }
+
+  // The graph of in-place edges is acyclic now. Its longest chain is the
+  // depth validation needs before it moves into the data at all.
+  const chain = new Map<string, number>()
+  const longest = (node: string): number => {
+    const known = chain.get(node)
+    if (known !== undefined) return known
+    let n = 1
+    for (const next of w.inPlace.get(node) ?? []) n = Math.max(n, 1 + longest(next))
+    chain.set(node, n)
+    return n
+  }
+  for (const node of w.nodes.keys()) {
+    if (longest(node) > MAX_APPLY_DEPTH) {
+      return [{ path: node, message: `the schema has a $ref/allOf/anyOf/oneOf chain more than ${MAX_APPLY_DEPTH} steps long` }]
+    }
+  }
   return []
 }
 
@@ -231,6 +252,11 @@ const show = (v: unknown) => {
 
 type Ctx = { root: unknown; issues: Issue[]; depth: number }
 
+/** Thrown when a check can't be completed; it ends the whole evaluation. */
+class Limit {
+  constructor(readonly message: string) {}
+}
+
 function resolve(root: unknown, ref: string): unknown {
   const target = refTarget(ref)
   if (target === null) return false
@@ -250,7 +276,7 @@ function apply(schema: unknown, value: unknown, path: string, ctx: Ctx) {
   if (schema === true) return
   if (schema === false) return add('no value is allowed here')
   if (!isObject(schema)) return add('schema error: subschema is not an object')
-  if (ctx.depth > MAX_APPLY_DEPTH) return add('the value is nested too deep to check')
+  if (ctx.depth > MAX_APPLY_DEPTH) throw new Limit(`checking needs more than ${MAX_APPLY_DEPTH} nested steps (the value or the schema nests too deep)`)
   ctx.depth++
   try {
     const has = (k: string) => Object.hasOwn(schema, k)
@@ -316,12 +342,31 @@ function apply(schema: unknown, value: unknown, path: string, ctx: Ctx) {
   }
 }
 
+export type Evaluation =
+  | { kind: 'valid' }
+  | { kind: 'invalid'; issues: Issue[] }
+  /** The check could not be completed; nothing is known about the value. */
+  | { kind: 'limit'; message: string }
+
 /**
- * Every way `value` breaks `schema` (at most 50), each with a JSON Pointer
- * path; empty when it validates. Assumes `checkSchema` passed.
+ * Applies `schema` to `value`: valid, every way it breaks (at most 50 issues,
+ * each with a JSON Pointer path), or a limit when the check couldn't finish
+ * (anywhere, inside anyOf/oneOf included). Assumes `checkSchema` passed.
  */
-export function validate(schema: unknown, value: unknown): Issue[] {
+export function evaluate(schema: unknown, value: unknown): Evaluation {
   const ctx: Ctx = { root: schema, issues: [], depth: 0 }
-  apply(schema, value, '', ctx)
-  return ctx.issues
+  try {
+    apply(schema, value, '', ctx)
+  } catch (err) {
+    if (err instanceof Limit) return { kind: 'limit', message: err.message }
+    throw err
+  }
+  return ctx.issues.length === 0 ? { kind: 'valid' } : { kind: 'invalid', issues: ctx.issues }
+}
+
+/** `evaluate` as a list of issues: empty only when the value validates. */
+export function validate(schema: unknown, value: unknown): Issue[] {
+  const r = evaluate(schema, value)
+  if (r.kind === 'valid') return []
+  return r.kind === 'invalid' ? r.issues : [{ path: '', message: r.message }]
 }
