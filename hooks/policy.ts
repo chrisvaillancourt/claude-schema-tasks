@@ -172,8 +172,17 @@ export function judge(c: Contract, text: string): Judged {
 
 const cut = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 3)}...` : s)
 
+/**
+ * A path or message on one line: property names and values come from the
+ * subagent, so a line break in one could otherwise start a line that looks
+ * like the mod's own (a status note heading, a "passed").
+ */
+const oneLine = (s: string) => s.replace(/[\u0000-\u001f\u007f\u2028\u2029]/g, ch => `\\u${ch.charCodeAt(0).toString(16).padStart(4, '0')}`)
+
 function listIssues(issues: Issue[]): string {
-  const shown = issues.slice(0, MAX_LISTED).map(i => `- ${i.path === '' ? '(root)' : cut(i.path, MAX_ISSUE_CHARS)}: ${cut(i.message, MAX_ISSUE_CHARS)}`)
+  const shown = issues
+    .slice(0, MAX_LISTED)
+    .map(i => `- ${i.path === '' ? '(root)' : cut(oneLine(i.path), MAX_ISSUE_CHARS)}: ${cut(oneLine(i.message), MAX_ISSUE_CHARS)}`)
   if (issues.length > MAX_LISTED) shown.push(`- ...and ${issues.length - MAX_LISTED} more`)
   return shown.join('\n')
 }
