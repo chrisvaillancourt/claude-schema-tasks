@@ -4,8 +4,8 @@ A Claude Code mod (function-hook plugin): schema-checked delegation through the 
 
 ## Layout
 
-- `hooks/schema.ts`: the JSON Schema subset. `checkSchema` refuses a schema before any child starts (unsupported keyword, bad keyword value, unresolved or non-local `$ref`, a `$ref`/`allOf`/`anyOf`/`oneOf` cycle that consumes no data, too many bytes, nodes or levels); `validate` collects every issue with a JSON Pointer path. Pure, no `eval`, no `RegExp` built from schema text.
-- `hooks/policy.ts`: everything else that is pure: the envelope parser, the child prompt, the strict reply parser, feedback text, the contract state machine (`transition(contracts, event) → { contracts, action }`), command parsing and status text. Unit-tested in `policy.test.ts` and `schema.test.ts`.
+- `hooks/schema.ts`: the JSON Schema subset. `checkSchema` refuses a schema before any child starts (unsupported keyword, bad keyword value, unresolved or non-local `$ref`, a `$ref`/`allOf`/`anyOf`/`oneOf` cycle that consumes no data, too many bytes, nodes or levels, a non-finite number); `validate` collects every issue with a JSON Pointer path. Pure, no `eval`, no `RegExp` built from schema text.
+- `hooks/policy.ts`: everything else that is pure: the envelope parser, the child prompt, the strict reply parser (it refuses a non-finite number anywhere in the reply, and `judge` checks that the validated value survives a JSON round trip before it is stored), feedback text, the contract state machine (`transition(contracts, event) → { contracts, action }`), command parsing and status text. Unit-tested in `policy.test.ts` and `schema.test.ts`.
 - `hooks/register.ts`: wiring only. Each hook turns its engine event into one state-machine event, applies it in one versioned `update`, and does what the returned action says.
 - `types/index.d.ts`: `Contract`, `Phase`, `Issue`, `Config`, `Session` and the `$.state` contract (`PluginState['schema-tasks']`: `session`, `contracts`).
 - `.claude-plugin/plugin.json`: manifest and the `userConfig` options (`enabled`, `maxRepairs`, `maxSchemaBytes`, `maxResultBytes`).

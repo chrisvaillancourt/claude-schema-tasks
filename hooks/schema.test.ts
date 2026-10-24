@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { checkSchema, validate } from './schema'
+import { checkSchema, roundTrips, validate } from './schema'
 
 const LIMITS = { maxBytes: 32768, maxDepth: 32, maxNodes: 2000 }
 const ok = (s: unknown) => checkSchema(s, LIMITS)
@@ -126,5 +126,14 @@ describe('validate', () => {
     const tree = { type: 'object', properties: { v: { type: 'number' }, kids: { type: 'array', items: { $ref: '#' } } }, required: ['v'] }
     expect(validate(tree, { v: 1, kids: [{ v: 2, kids: [] }] })).toEqual([])
     expect(paths(validate(tree, { v: 1, kids: [{ kids: [{ v: 'x' }] }] }))).toEqual(['/kids/0', '/kids/0/kids/0/v'])
+  })
+})
+
+describe('round trip (R1-1)', () => {
+  test('a value survives JSON only when every number is finite', async () => {
+    expect(roundTrips({ a: [1, 'x', null, { b: false }] })).toBe(true)
+    expect(roundTrips({ n: Infinity })).toBe(false)
+    expect(roundTrips([NaN])).toBe(false)
+    expect(roundTrips({ u: undefined })).toBe(false)
   })
 })

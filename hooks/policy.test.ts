@@ -8,6 +8,7 @@ import {
   configFrom,
   feedback,
   isActive,
+  judge,
   newContract,
   parseArgs,
   parseEnvelope,
@@ -286,5 +287,39 @@ describe('schema_result and status', () => {
     expect(text).toContain('1/3')
     expect(showText(s, 'a1')).toContain('/verdict')
     expect(showText(s, 'zzz')).toContain('No contract')
+  })
+})
+
+describe('numbers JSON cannot hold (R1-1)', () => {
+  const NUM = { type: 'object', properties: { n: { type: 'number' } }, required: ['n'] }
+
+  test('an overflowing number in a reply is refused, typed or not', async () => {
+    for (const text of ['{"n":1e400}', '{"n":-1e400}', '{"n":1,"extra":[2,1e999]}']) {
+      const r = judge(running({ schema: NUM }), text)
+      expect(r.ok).toBe(false)
+      expect(r.ok ? '' : r.issues[0]!.message).toContain('out of range')
+    }
+    const open = judge(running({ schema: { type: 'object' } }), '{"x":{"y":1e400}}')
+    expect(open.ok ? [] : open.issues.map(i => i.path)).toEqual(['/x/y'])
+  })
+
+  test('an overflowing reply never becomes a valid contract with null data', async () => {
+    const done = transition([running({ schema: NUM })], { kind: 'complete', agentId: 'a1', reason: 'answer', answer: '{"n":1e400}', enabled: true })
+    expect(done.contracts[0]!).toMatchObject({ phase: 'failed', hasData: false })
+    const late = transition([running({ schema: NUM })], { kind: 'agentResult', id: 'tu1', outcome: { kind: 'completed', agentId: 'a1', text: '{"n":1e400}' } })
+    expect(late.action.kind).toBe('deny')
+  })
+
+  test('an overflowing number in a schema is refused before the child starts', async () => {
+    const text = '{"claudeSchemaTasks":1,"task":"x","schema":{"type":"object","properties":{"n":{"const":1e400}}}}'
+    const r = parseEnvelope(text, CONFIG)
+    expect(r.kind).toBe('invalid')
+    expect(r.kind === 'invalid' ? r.issues.map(i => i.path) : []).toEqual(['/properties/n/const'])
+  })
+
+  test('what is published is what was validated', async () => {
+    const r = judge(running({ schema: NUM }), '{"n":1e-400}')
+    expect(r).toEqual({ ok: true, value: { n: 0 } })
+    expect(JSON.parse(JSON.stringify(r.ok ? r.value : null))).toEqual({ n: 0 })
   })
 })

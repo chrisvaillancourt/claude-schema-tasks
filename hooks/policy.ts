@@ -1,6 +1,6 @@
 // Pure decisions: no `$`, no I/O. register.ts turns engine events into the
 // events of `transition` and carries out the action it returns.
-import { checkSchema, utf8Length, validate } from './schema'
+import { checkSchema, nonFinitePath, roundTrips, utf8Length, validate } from './schema'
 import type { Config, Contract, Failure, FailureCode, Gate, Issue, Mode, Phase, Session } from '../types'
 
 export const INITIAL: Session = { mode: null }
@@ -146,18 +146,26 @@ export function parseReply(text: string, maxBytes: number): Judged {
   const t = text.trim()
   if (t === '') return { ok: false, issues: [{ path: '', message: 'the reply is empty; it must be one JSON value' }] }
   if (t.startsWith('```')) return { ok: false, issues: [{ path: '', message: 'the reply is wrapped in a code fence; send the bare JSON value' }] }
+  let value: unknown
   try {
-    return { ok: true, value: JSON.parse(t) }
+    value = JSON.parse(t)
   } catch {
     return { ok: false, issues: [{ path: '', message: 'the reply is not exactly one JSON value (text before or after it, or a JSON syntax error)' }] }
   }
+  // 1e400 parses to Infinity, which validates as a number and is stored as null.
+  const huge = nonFinitePath(value)
+  if (huge !== null) return { ok: false, issues: [{ path: huge, message: 'this number is out of range: JSON numbers here must fit a 64-bit float' }] }
+  return { ok: true, value }
 }
 
 export function judge(c: Contract, text: string): Judged {
   const parsed = parseReply(text, c.maxResultBytes)
   if (!parsed.ok) return parsed
   const issues = validate(c.schema, parsed.value)
-  return issues.length === 0 ? parsed : { ok: false, issues }
+  if (issues.length > 0) return { ok: false, issues }
+  // What is stored and published must be exactly what was validated.
+  if (!roundTrips(parsed.value)) return { ok: false, issues: [{ path: '', message: 'the value does not survive being written back as JSON' }] }
+  return parsed
 }
 
 const cut = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 3)}...` : s)

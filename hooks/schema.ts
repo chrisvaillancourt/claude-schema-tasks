@@ -53,6 +53,33 @@ function jsonDepth(v: unknown, depth = 1): number {
   return depth
 }
 
+/**
+ * The JSON Pointer of the first number that is not finite (JSON text such as
+ * `1e400` parses to Infinity, which JSON.stringify writes back as null), or
+ * null when there is none. Iterative, so deep data can't overflow the stack.
+ */
+export function nonFinitePath(v: unknown): string | null {
+  const stack: [unknown, string][] = [[v, '']]
+  while (stack.length > 0) {
+    const [x, at] = stack.pop()!
+    if (typeof x === 'number') {
+      if (!Number.isFinite(x)) return at
+    } else if (Array.isArray(x)) {
+      for (let i = x.length - 1; i >= 0; i--) stack.push([x[i], `${at}/${i}`])
+    } else if (isObject(x)) {
+      const keys = Object.keys(x)
+      for (let i = keys.length - 1; i >= 0; i--) stack.push([x[keys[i]!], `${at}/${escapePointer(keys[i]!)}`])
+    }
+  }
+  return null
+}
+
+/** True when writing `v` as JSON and reading it back gives the same value. */
+export function roundTrips(v: unknown): boolean {
+  const text = JSON.stringify(v)
+  return text !== undefined && deepEqual(JSON.parse(text), v)
+}
+
 const isCount = (v: unknown) => typeof v === 'number' && Number.isInteger(v) && v >= 0
 
 type Walk = { nodes: Map<string, unknown>; refs: { at: string; ref: string }[]; inPlace: Map<string, string[]>; issues: Issue[] }
@@ -124,6 +151,8 @@ function refTarget(ref: string): string | null {
  */
 export function checkSchema(schema: unknown, limits: SchemaLimits): Issue[] {
   if (!isObject(schema)) return [{ path: '', message: 'the schema must be a JSON object' }]
+  const huge = nonFinitePath(schema)
+  if (huge !== null) return [{ path: huge, message: 'this number is out of range for JSON (it reads as Infinity)' }]
   const bytes = utf8Length(JSON.stringify(schema))
   if (bytes > limits.maxBytes) return [{ path: '', message: `the schema is ${bytes} bytes; the limit is ${limits.maxBytes} bytes` }]
   if (jsonDepth(schema) > limits.maxDepth) return [{ path: '', message: `the schema is nested too deep (limit ${limits.maxDepth} levels)` }]
