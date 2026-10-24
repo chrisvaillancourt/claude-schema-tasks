@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { checkSchema, evaluate, roundTrips, validate } from './schema'
+import { checkSchema, codePointLength, evaluate, roundTrips, validate } from './schema'
 
 const LIMITS = { maxBytes: 32768, maxDepth: 32, maxNodes: 2000 }
 const ok = (s: unknown) => checkSchema(s, LIMITS)
@@ -192,5 +192,24 @@ describe('work budget (R1-3)', () => {
     expect(evaluate(s, Array(100).fill(0), { maxWork: 1000 }).kind).toBe('valid')
     expect(evaluate({ anyOf: [{}, { allOf: [{}, {}, {}, {}] }] }, 1, { maxWork: 3 }).kind).toBe('valid')
     expect(evaluate({ oneOf: [{}, {}, { allOf: [{}, {}, {}, {}] }] }, 1, { maxWork: 4 }).kind).toBe('invalid')
+  })
+})
+
+describe('string length counts code points (R1-5)', () => {
+  test('an astral character is one character', async () => {
+    const face = '\u{1F600}'
+    expect(face.length).toBe(2)
+    expect(paths(validate({ type: 'string', minLength: 2 }, face))).toEqual([''])
+    expect(validate({ type: 'string', maxLength: 1 }, face)).toEqual([])
+    expect(validate({ minLength: 2, maxLength: 2 }, `a${face}`)).toEqual([])
+    expect(paths(validate({ maxLength: 2 }, `${face}${face}x`))).toEqual([''])
+    expect(validate({ maxLength: 3 }, `${face}${face}x`)).toEqual([])
+  })
+
+  test('a lone surrogate counts as one character', async () => {
+    expect(codePointLength('\uD83D')).toBe(1)
+    expect(codePointLength('\uDE00\uD83D')).toBe(2)
+    expect(codePointLength('a\u{1F600}b')).toBe(3)
+    expect(codePointLength('')).toBe(0)
   })
 })

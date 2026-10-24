@@ -62,6 +62,23 @@ export function utf8Length(text: string): number {
   return n
 }
 
+/**
+ * Unicode code points, as JSON Schema's minLength/maxLength count them: a
+ * surrogate pair is one, a lone surrogate is one. No intermediate array.
+ */
+export function codePointLength(text: string): number {
+  let n = 0
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i)
+    if (c >= 0xd800 && c <= 0xdbff && i + 1 < text.length) {
+      const d = text.charCodeAt(i + 1)
+      if (d >= 0xdc00 && d <= 0xdfff) i++
+    }
+    n++
+  }
+  return n
+}
+
 function jsonDepth(v: unknown, depth = 1): number {
   if (Array.isArray(v)) return v.reduce<number>((m, x) => Math.max(m, jsonDepth(x, depth + 1)), depth)
   if (isObject(v)) return Object.keys(v).reduce<number>((m, k) => Math.max(m, jsonDepth(v[k], depth + 1)), depth)
@@ -320,9 +337,10 @@ function apply(schema: unknown, value: unknown, path: string, ctx: Ctx) {
       if (has('exclusiveMinimum') && value <= (schema.exclusiveMinimum as number)) add(`must be > ${schema.exclusiveMinimum}`)
       if (has('exclusiveMaximum') && value >= (schema.exclusiveMaximum as number)) add(`must be < ${schema.exclusiveMaximum}`)
     }
-    if (typeof value === 'string') {
-      if (has('minLength') && value.length < (schema.minLength as number)) add(`must be at least ${schema.minLength} characters`)
-      if (has('maxLength') && value.length > (schema.maxLength as number)) add(`must be at most ${schema.maxLength} characters`)
+    if (typeof value === 'string' && (has('minLength') || has('maxLength'))) {
+      const n = codePointLength(value)
+      if (has('minLength') && n < (schema.minLength as number)) add(`must be at least ${schema.minLength} characters`)
+      if (has('maxLength') && n > (schema.maxLength as number)) add(`must be at most ${schema.maxLength} characters`)
     }
     if (Array.isArray(value)) {
       if (has('minItems') && value.length < (schema.minItems as number)) add(`must have at least ${schema.minItems} items`)
