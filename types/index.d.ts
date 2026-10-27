@@ -20,8 +20,13 @@ export type Session = {
 /** One problem with a schema or a reply, at a JSON Pointer path ('' is the root). */
 export type Issue = { path: string; message: string }
 
-/** Where a contract stands; `valid`, `failed` and `cancelled` are final. */
-export type Phase = 'starting' | 'running' | 'valid' | 'failed' | 'cancelled'
+/**
+ * Where a contract stands; `valid`, `failed` and `cancelled` are final.
+ * `interrupted`: it was `starting` or `running` when Claude Code restarted the
+ * session process; its report is unvalidated, and a later final check for its
+ * agent can still settle it.
+ */
+export type Phase = 'starting' | 'running' | 'interrupted' | 'valid' | 'failed' | 'cancelled'
 
 export type FailureCode =
   | 'repairs-exhausted'
@@ -68,7 +73,20 @@ export type Contract = {
   failure: Failure | null
   /** Problems from the last check that failed. */
   lastIssues: Issue[]
+  /** Restored after a restart: it passed, but its JSON was over the size kept per session. */
+  dataDropped?: boolean
+  /** Restored after a restart without its schema (finished, or over the size kept): it can't be checked again. */
+  schemaDropped?: boolean
 }
+
+/** One contract as `$.store` keeps it across a restart: no task, and `schema`/`data` only while they fit. */
+export type StoredContract = Pick<
+  Contract,
+  'id' | 'parentAgentId' | 'agentId' | 'description' | 'phase' | 'background' | 'maxRepairs' | 'maxResultBytes' | 'repairsUsed' | 'gate' | 'gatePassed' | 'failure'
+> & { schema?: unknown; data?: unknown; dataDropped?: true }
+
+/** `$.store` key `contracts/<session id>`: the session's contracts, rewritten on every change. */
+export type ContractRecord = { v: 1; at: number; contracts: StoredContract[] }
 
 declare module 'claude-code' {
   interface PluginState {

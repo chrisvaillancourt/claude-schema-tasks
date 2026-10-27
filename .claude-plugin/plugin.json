@@ -1,6 +1,6 @@
 {
   "name": "schema-tasks",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "Delegate to a subagent with a JSON Schema and get back a validated result",
   "types": "./types/index.d.ts",
   "userConfig": {

@@ -14,11 +14,15 @@ import {
   parseArgs,
   parseEnvelope,
   parseReply,
+  RECORD_MAX_BYTES,
+  restoreContracts,
   resultFor,
   showText,
+  toRecord,
   statusText,
   transition,
 } from './policy'
+import { utf8Length } from './schema'
 import type { Contract } from '../types'
 
 const CONFIG = configFrom({})
@@ -364,5 +368,60 @@ describe('diagnostics are one line each', () => {
     expect(lines.filter(l => l.startsWith(NOTE_HEAD))).toEqual([])
     expect(lines.filter(l => l.startsWith('schema-tasks: contract') || l.startsWith('schema-tasks: forged'))).toEqual([])
     expect(lines.filter(l => l.startsWith('- ')).length).toBe(1)
+  })
+})
+
+describe('the record kept across a restart', () => {
+  const valid = (id: string, data: unknown) => open({ id, agentId: `a-${id}`, phase: 'valid', hasData: true, data })
+
+  test('a record keeps no task, the schema only for open contracts, and the data of valid ones', async () => {
+    const r = toRecord([running(), valid('tu2', { verdict: 'pass' })], 5)
+    expect(r.v).toBe(1)
+    expect(r.at).toBe(5)
+    expect(r.contracts[0]).toMatchObject({ id: 'tu1', phase: 'running', schema: SCHEMA })
+    expect(Object.hasOwn(r.contracts[0] ?? {}, 'task')).toBe(false)
+    expect(Object.hasOwn(r.contracts[1] ?? {}, 'schema')).toBe(false)
+    expect(r.contracts[1]).toMatchObject({ phase: 'valid', data: { verdict: 'pass' } })
+  })
+
+  test('past the size cap the oldest data is dropped first, with a flag; the status stays', async () => {
+    const big = 'x'.repeat(Math.floor(RECORD_MAX_BYTES / 3))
+    const r = toRecord([valid('t1', big), valid('t2', big), valid('t3', big), valid('t4', { small: true })], 0)
+    expect(utf8Length(JSON.stringify(r))).toBeLessThanOrEqual(RECORD_MAX_BYTES)
+    expect(r.contracts.map(c => c.phase)).toEqual(['valid', 'valid', 'valid', 'valid'])
+    expect(r.contracts[0]?.dataDropped).toBe(true)
+    expect(Object.hasOwn(r.contracts[0] ?? {}, 'data')).toBe(false)
+    expect(r.contracts[2]?.data).toBe(big)
+    expect(r.contracts[3]?.data).toEqual({ small: true })
+  })
+
+  test('restored: finished contracts as they were, open ones interrupted; a dropped schema is marked', async () => {
+    const r = toRecord([running(), open({ id: 'tu0' }), valid('tu2', null), valid('tu3', 1)], 0)
+    const back = restoreContracts(JSON.parse(JSON.stringify({ ...r, contracts: [...r.contracts.slice(0, 3), { ...r.contracts[3], data: undefined, dataDropped: true }] })))
+    expect(back?.map(c => c.phase)).toEqual(['interrupted', 'interrupted', 'valid', 'valid'])
+    expect(back?.[0]?.schema).toEqual(SCHEMA)
+    // A foreground child's Agent call ended with the old process: its report now arrives as a delivery.
+    expect(back?.[0]?.background).toBe(true)
+    expect(back?.[2]?.background).toBe(false)
+    expect(back?.[2]).toMatchObject({ hasData: true, data: null })
+    expect(back?.[3]).toMatchObject({ hasData: false, dataDropped: true })
+    expect(back?.[2]?.schemaDropped).toBe(true)
+    expect(restoreContracts({ v: 2, at: 0, contracts: [] })).toBeNull()
+    expect(restoreContracts('x')).toBeNull()
+    // A schema the validator would refuse is not trusted.
+    const bad = restoreContracts({ v: 1, at: 0, contracts: [{ ...r.contracts[0], schema: { pattern: 'a' } }] })
+    expect(bad?.[0]).toMatchObject({ phase: 'interrupted', schemaDropped: true })
+  })
+
+  test('an interrupted contract without its schema is left interrupted by a late answer, and can be evicted', async () => {
+    const lost = open({ phase: 'interrupted', agentId: 'a1', schema: null, schemaDropped: true })
+    const r = transition([lost], { kind: 'complete', agentId: 'a1', reason: 'answer', answer: '{"verdict":"pass"}', enabled: true })
+    expect(r.contracts[0]?.phase).toBe('interrupted')
+    expect(resultFor(r.contracts, 'a1', null)).toMatchObject({ status: 'interrupted' })
+    let s: Contract[] = []
+    for (let i = 0; i < MAX_CONTRACTS; i++) s = [...s, open({ id: `t${i}`, phase: 'interrupted', agentId: `a${i}` })]
+    const opened = transition(s, { kind: 'open', contract: open({ id: 'new' }) })
+    expect(opened.action.kind).toBe('pass')
+    expect(opened.contracts.map(c => c.id)).not.toContain('t0')
   })
 })

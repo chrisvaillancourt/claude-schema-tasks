@@ -6,6 +6,9 @@ const ENGINE = { plugin: 'engine', tier: 'core' } as const
 const SCHEMA = { type: 'object', properties: { verdict: { enum: ['pass', 'fail'] } }, required: ['verdict'], additionalProperties: false }
 const ENVELOPE = JSON.stringify({ claudeSchemaTasks: 1, schema: SCHEMA, task: 'Judge it.' })
 const TOOL = 'mcp__schema-tasks__schema_result'
+const T0 = 1_000_000_000_000
+const DAY = 24 * 60 * 60 * 1000
+const KEY = 'contracts/sid-1'
 
 /** What one fake child does inside the Agent call. */
 type Script = (T: any, agentId: string) => Promise<{ answer: string; reason?: 'answer' | 'aborted' } | null>
@@ -14,15 +17,44 @@ type World = {
   spawnPrompts: string[]
   handbacks: string[]
   logs: string[]
+  /** Toasts and notifications the mod raised. */
+  alerts: string[]
   agentCalls: number
   script: Script
   background: boolean
   pointer: boolean
+  /** `$.store` as a map the test can seed and read back. */
+  store: Map<string, unknown>
+  /** Every store call is refused. */
+  storeFails: boolean
 }
 
 /** The engine beneath the plugin. The Agent tool spawns a child and runs `script` as that child. */
 function world(on: On, T: any, w: World) {
   let n = 0
+  mock.clock(on, { now: T0 })
+  on('session.id', () => ({ value: 'sid-1' }))
+  const refused = { deny: 'store unavailable' }
+  on('store.get', ($, e) => (w.storeFails ? refused : { value: w.store.get(e.key) }))
+  on('store.set', ($, e) => {
+    if (w.storeFails) return refused
+    w.store.set(e.key, JSON.parse(JSON.stringify(e.value)))
+    return { value: undefined }
+  })
+  on('store.delete', ($, e) => {
+    if (w.storeFails) return refused
+    w.store.delete(e.key)
+    return { value: undefined }
+  })
+  on('store.keys', () => (w.storeFails ? refused : { value: [...w.store.keys()] }))
+  on('ui.toast', ($, e) => {
+    w.alerts.push(`toast: ${e.text}`)
+    return { value: undefined }
+  })
+  on('ui.notify', ($, e) => {
+    w.alerts.push(`notify: ${e.text}`)
+    return { value: { isSent: false as const, reason: 'no-channel' as const } }
+  })
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   on('command.register', ($, e) => ({ value: { command: e.name } }))
   on('tool.register', ($, e) => ({ value: { tool: `mcp__schema-tasks__${e.name}` } }))
@@ -67,7 +99,7 @@ function world(on: On, T: any, w: World) {
 }
 
 function fresh(script: Script, over: Partial<World> = {}): World {
-  return { spawnPrompts: [], handbacks: [], logs: [], agentCalls: 0, script, background: false, pointer: false, ...over }
+  return { spawnPrompts: [], handbacks: [], logs: [], alerts: [], agentCalls: 0, script, background: false, pointer: false, store: new Map(), storeFails: false, ...over }
 }
 
 const start = ($: any) => $.session.start({ cwd: '/x', surface: 'terminal', isInteractive: false })
@@ -350,5 +382,172 @@ describe('schema-tasks', () => {
     await start($)
     const res = await status($, 'bogus')
     expect(res.text).toContain('Usage: /schema-tasks')
+  })
+
+  describe('a restart of the session process', () => {
+    /** One contract as the record keeps it. */
+    const stored = (over: Record<string, unknown> = {}) => ({
+      id: 'tu1', parentAgentId: null, agentId: 'a1', description: 'judge', phase: 'running', background: true,
+      maxRepairs: 3, maxResultBytes: 262144, repairsUsed: 0, gate: null, gatePassed: false, failure: null, schema: SCHEMA,
+      ...over,
+    })
+    const record = (contracts: unknown[], at = T0 - 60_000) => ({ v: 1, at, contracts })
+    const lookup = ($: any, id: string) => $.tool.call({ tool: TOOL, agent_id: id } as any)
+    const notice = ($: any, id: string) =>
+      $.session.append({
+        door: 'delivery', origin: { kind: 'task-notification' }, uuid: `u-${id}-${Math.random()}`,
+        message: { type: 'attachment', name: 'queued_command', role: 'user', content: [{ type: 'text', text: `<task-notification>\n<task-id>${id}</task-id>\n<result>{"verdict":"pass"}</result>\n</task-notification>` }] },
+      } as any).then((r: any) => r.message.content.map((b: any) => b.text).join(''))
+    const complete = ($: any, agentId: string, answer: string) =>
+      $.turn.complete({ agentId, turnId: `t-${agentId}`, reason: 'answer', answer, durationMs: 1, isAborted: false })
+
+    test('the contracts are kept in the store under the session id while they live', async ($, on) => {
+      const w = fresh(async () => null, { background: true })
+      world(on, $, w)
+      await start($)
+      await agent($, ENVELOPE)
+      const live = w.store.get(KEY) as any
+      expect(live.at).toBe(T0)
+      expect(live.contracts).toHaveLength(1)
+      expect(live.contracts[0]).toMatchObject({ agentId: 'a1', parentAgentId: null, phase: 'running', background: true, schema: SCHEMA })
+      expect(live.contracts[0].task).toBeUndefined()
+      await complete($, 'a1', '{"verdict":"pass"}')
+      const done = (w.store.get(KEY) as any).contracts[0]
+      expect(done).toMatchObject({ phase: 'valid', data: { verdict: 'pass' } })
+    })
+
+    test('an ordinary session writes nothing to the store', async ($, on) => {
+      const w = fresh(async () => ({ answer: 'prose' }))
+      world(on, $, w)
+      await start($)
+      await agent($, 'Summarize the repo.')
+      expect([...w.store.keys()]).toEqual([])
+    })
+
+    test('a new process restores finished contracts: schema_result still answers the validated data', async ($, on) => {
+      const w = fresh(async () => null, { background: true })
+      w.store.set(KEY, record([
+        stored({ phase: 'valid', data: { verdict: 'pass' } }),
+        stored({ id: 'tu2', agentId: 'a2', phase: 'failed', failure: { code: 'final-invalid', message: 'the answer the subagent delivered does not validate', issues: [{ path: '/verdict', message: 'bad' }] } }),
+      ]))
+      world(on, $, w)
+      await start($)
+      expect(JSON.parse((await lookup($, 'a1')).result as string)).toEqual({ status: 'ok', data: { verdict: 'pass' } })
+      expect(JSON.parse((await lookup($, 'a2')).result as string)).toMatchObject({ status: 'failed', code: 'final-invalid' })
+      expect(await notice($, 'a1')).toContain('Validated JSON:\n{"verdict":"pass"}')
+      const restart = w.logs.filter(l => /restart/i.test(l))
+      expect(restart).toHaveLength(1)
+      expect(restart[0]).toContain('restored 2 contracts')
+      expect(restart[0]).toContain('0 were interrupted')
+      expect(restart[0]?.startsWith('schema-tasks: ')).toBe(false)
+      expect(w.alerts).toEqual([])
+      // The record now says what was restored, stamped with the restart.
+      expect((w.store.get(KEY) as any).at).toBe(T0)
+    })
+
+    test('a contract that was running comes back interrupted, and its report reads as unvalidated', async ($, on) => {
+      const w = fresh(async () => null, { background: true })
+      w.store.set(KEY, record([stored({ phase: 'starting', agentId: null, id: 'tu0' }), stored()]))
+      world(on, $, w)
+      await start($)
+      expect(w.logs.find(l => /restart/i.test(l))).toContain('2 were interrupted')
+      const answer = JSON.parse((await lookup($, 'a1')).result as string)
+      expect(answer.status).toBe('interrupted')
+      expect(answer.message).toContain('restarted the session while agent a1 ran')
+      expect(answer.message).toContain('unvalidated')
+      const noted = await notice($, 'a1')
+      expect(noted).toContain('restarted the session while agent a1 ran')
+      expect(noted).toContain('not a validated result')
+      expect(noted).not.toContain('Validated JSON')
+      expect((await status($)).text).toContain('tu1 interrupted')
+      expect((w.store.get(KEY) as any).contracts.map((c: any) => c.phase)).toEqual(['interrupted', 'interrupted'])
+      expect(w.alerts).toEqual([])
+    })
+
+    test('a late turn.complete runs the final check on an interrupted contract: valid replaces the status', async ($, on) => {
+      const w = fresh(async () => null, { background: true })
+      w.store.set(KEY, record([stored(), stored({ id: 'tu2', agentId: 'a2' })]))
+      world(on, $, w)
+      await start($)
+      await complete($, 'a1', '{"verdict":"pass"}')
+      await complete($, 'a2', 'Verdict: pass.')
+      expect(JSON.parse((await lookup($, 'a1')).result as string)).toEqual({ status: 'ok', data: { verdict: 'pass' } })
+      expect(JSON.parse((await lookup($, 'a2')).result as string)).toMatchObject({ status: 'failed', code: 'final-invalid' })
+      expect(await notice($, 'a1')).toContain('passed')
+    })
+
+    test('a valid contract whose data was not kept for size is denied with the reason', async ($, on) => {
+      const w = fresh(async () => null, { background: true })
+      w.store.set(KEY, record([stored({ phase: 'valid', dataDropped: true })]))
+      world(on, $, w)
+      await start($)
+      const r = await lookup($, 'a1')
+      expect(r.result).toBeUndefined()
+      const denied = String(r.deny)
+      expect(denied).toContain('passed its check')
+      expect(denied).toContain('could not be kept across')
+      expect(denied).toContain('Ask the subagent for its result again')
+      expect(denied).toContain('unvalidated')
+      const noted = await notice($, 'a1')
+      expect(noted).toContain('not a validated result')
+      expect(noted).not.toContain('Validated JSON')
+    })
+
+    test('a hot reload leaves the live contracts and the record alone, and reports nothing', async ($, on) => {
+      const w = fresh(async () => null, { background: true })
+      world(on, $, w)
+      await start($)
+      await agent($, ENVELOPE)
+      await start($)
+      expect(w.logs.some(l => /restart/i.test(l))).toBe(false)
+      expect(JSON.parse((await lookup($, 'a1')).result as string)).toEqual({ status: 'pending' })
+      expect((await status($)).text).toContain('1 contract this session')
+      expect((w.store.get(KEY) as any).contracts).toHaveLength(1)
+    })
+
+    test('a record that does not parse is dropped without a report', async ($, on) => {
+      const w = fresh(async () => null, { background: true })
+      w.store.set(KEY, { v: 1, at: T0, contracts: 'nope' })
+      world(on, $, w)
+      await start($)
+      expect(w.store.get(KEY)).toBeUndefined()
+      expect(w.logs.some(l => /restart/i.test(l))).toBe(false)
+    })
+
+    test('entries that do not parse are skipped, the rest restored', async ($, on) => {
+      const w = fresh(async () => null, { background: true })
+      w.store.set(KEY, record([stored({ phase: 'sideways' }), stored({ id: 'tu2', agentId: 'a2', phase: 'valid', data: null })]))
+      world(on, $, w)
+      await start($)
+      expect(w.logs.find(l => /restart/i.test(l))).toContain('restored 1 contract')
+      expect(JSON.parse((await lookup($, 'a2')).result as string)).toEqual({ status: 'ok', data: null })
+      expect((await lookup($, 'a1')).deny).toContain('No schema-tasks contract')
+    })
+
+    test('other sessions\' records are left alone and week-old ones are pruned', async ($, on) => {
+      const w = fresh(async () => null, { background: true })
+      w.store.set('contracts/other', record([stored()], T0 - DAY))
+      w.store.set('contracts/old', record([stored()], T0 - 8 * DAY))
+      w.store.set('contracts/junk', 'x')
+      w.store.set('unrelated', { at: 0 })
+      world(on, $, w)
+      await start($)
+      expect(w.store.get('contracts/other')).toBeDefined()
+      expect(w.store.get('contracts/old')).toBeUndefined()
+      expect(w.store.get('contracts/junk')).toBeUndefined()
+      expect(w.store.get('unrelated')).toBeDefined()
+      expect(w.logs.some(l => /restart/i.test(l))).toBe(false)
+      expect(String((await lookup($, 'a1')).deny)).toContain('No schema-tasks contract')
+    })
+
+    test('a store that refuses every call does not change the normal path', async ($, on) => {
+      const w = fresh(async () => ({ answer: '{"verdict":"pass"}' }), { storeFails: true })
+      world(on, $, w)
+      await start($)
+      const r = await agent($, ENVELOPE)
+      expect(r.context?.join('\n')).toContain('Validated JSON:\n{"verdict":"pass"}')
+      await start($)
+      expect(w.alerts).toEqual([])
+    })
   })
 })

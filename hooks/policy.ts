@@ -1,7 +1,7 @@
 // Pure decisions: no `$`, no I/O. register.ts turns engine events into the
 // events of `transition` and carries out the action it returns.
 import { checkSchema, evaluate, nonFinitePath, roundTrips, utf8Length } from './schema'
-import type { Config, Contract, Failure, FailureCode, Gate, Issue, Mode, Phase, Session } from '../types'
+import type { Config, Contract, ContractRecord, Failure, FailureCode, Gate, Issue, Mode, Phase, Session, StoredContract } from '../types'
 
 export const INITIAL: Session = { mode: null }
 
@@ -17,6 +17,10 @@ export const TOOL_ID = 'mcp__schema-tasks__schema_result'
 
 const FINAL: ReadonlySet<Phase> = new Set(['valid', 'failed', 'cancelled'])
 export const isFinal = (c: Contract) => FINAL.has(c.phase)
+/** A valid contract whose JSON is on hand (not dropped for size across a restart). */
+const hasResult = (c: Contract) => c.phase === 'valid' && c.dataDropped !== true
+/** An interrupted contract restored without its schema: no answer can be checked for it. */
+const uncheckable = (c: Contract) => c.phase === 'interrupted' && c.schemaDropped === true
 
 function clampInt(v: unknown, lo: number, hi: number, fallback: number): number {
   if (typeof v !== 'number' || !Number.isFinite(v)) return fallback
@@ -255,6 +259,29 @@ function validText(c: Contract): string {
   return `schema-tasks: contract ${c.id} passed. The subagent's result validates against the schema. Validated JSON:\n${JSON.stringify(c.data)}`
 }
 
+/** A finished contract's status: the validated JSON, the failure, or the JSON a restart could not keep. */
+function resultText(c: Contract): string {
+  if (hasResult(c)) return validText(c)
+  if (c.phase === 'valid') return droppedText(c)
+  return failureText(c)
+}
+
+function droppedText(c: Contract): string {
+  return (
+    `schema-tasks: contract ${c.id} (agent ${c.agentId ?? '-'}) passed its check, but its validated JSON could not be kept across Claude Code restarting the session ` +
+    `(it was over the ${RECORD_MAX_BYTES / 1024} KB kept per session). Ask the subagent for its result again, or use its report only as unvalidated: it is not a schema-checked result.`
+  )
+}
+
+function interruptedText(c: Contract): string {
+  return (
+    `schema-tasks: contract ${c.id}: Claude Code restarted the session while agent ${c.agentId ?? '-'} ran, so its report is not a validated result: it is unvalidated and must not be used as a schema-checked one. ` +
+    (c.schemaDropped === true
+      ? 'Its schema could not be kept across the restart, so no answer can be checked for it now.'
+      : `If the subagent still finishes in this session, its final check runs and ${TOOL_ID} answers with the outcome.`)
+  )
+}
+
 function pendingText(c: Contract): string {
   return `schema-tasks: contract ${c.id} is pending. When agent ${c.agentId} has finished, call ${TOOL_ID}({"agent_id": "${c.agentId}"}) for the validated result; its completion notice and report are not the result.`
 }
@@ -265,7 +292,9 @@ export function transition(list: Contract[], ev: ContractEvent): Step {
     case 'open': {
       let next = list.filter(c => c.id !== ev.contract.id)
       while (next.length >= MAX_CONTRACTS) {
-        const i = next.findIndex(isFinal)
+        // Finished ones go first, then ones a restart interrupted.
+        let i = next.findIndex(isFinal)
+        if (i < 0) i = next.findIndex(c => c.phase === 'interrupted')
         if (i < 0) return { contracts: list, action: { kind: 'deny', text: `schema-tasks: ${MAX_CONTRACTS} structured delegations are already open; wait for one to finish.` } }
         next = next.filter((_, j) => j !== i)
       }
@@ -288,6 +317,7 @@ export function transition(list: Contract[], ev: ContractEvent): Step {
       // A child that reports through the hand-back tool is gated there; its
       // stop afterwards carries no report to judge.
       if (ev.gate === 'stop' && c.gate === 'handback') return { contracts: list, action: PASS }
+      if (uncheckable(c)) return { contracts: list, action: PASS }
       const j = judge(c, ev.text)
       if (j.ok) return { contracts: replace(list, { ...c, gate: ev.gate, gatePassed: true, lastIssues: [] }), action: PASS }
       if (j.limit) return { contracts: replace(list, fail({ ...c, gate: ev.gate }, 'validation-limit', LIMIT_MESSAGE, j.issues)), action: PASS }
@@ -308,6 +338,7 @@ export function transition(list: Contract[], ev: ContractEvent): Step {
       if (ev.reason === 'refusal') return { contracts: replace(list, fail(c, 'refusal', 'the model refused the task')), action: PASS }
       if (ev.reason === 'error') return { contracts: replace(list, fail(c, 'error', 'an API error ended the subagent')), action: PASS }
       if (!ev.enabled) return { contracts: replace(list, fail(c, 'disabled', 'schema-tasks was turned off while the subagent ran')), action: PASS }
+      if (uncheckable(c)) return { contracts: list, action: PASS }
       const j = judge(c, ev.answer)
       const next = j.ok
         ? succeed(c, j.value)
@@ -326,9 +357,10 @@ export function transition(list: Contract[], ev: ContractEvent): Step {
       const c = found.agentId === null ? { ...found, agentId: o.agentId, phase: found.phase === 'starting' ? ('running' as const) : found.phase } : found
       if (o.kind === 'launched') {
         const bg = { ...c, background: true }
-        const action: Action = isFinal(bg) ? (bg.phase === 'valid' ? { kind: 'context', text: validText(bg) } : { kind: 'context', text: failureText(bg) }) : { kind: 'context', text: pendingText(bg) }
+        const action: Action = { kind: 'context', text: isFinal(bg) ? resultText(bg) : bg.phase === 'interrupted' ? interruptedText(bg) : pendingText(bg) }
         return { contracts: replace(list, bg), action }
       }
+      if (uncheckable(c)) return { contracts: list, action: { kind: 'deny', text: interruptedText(c) } }
       let done = c
       if (!isFinal(c)) {
         if (o.handback === 'flagged' || o.handback === 'withheld') {
@@ -342,7 +374,7 @@ export function transition(list: Contract[], ev: ContractEvent): Step {
               : fail(c, 'final-invalid', 'the Agent result does not validate (no checked answer was seen)', j.issues)
         }
       }
-      const action: Action = done.phase === 'valid' ? { kind: 'context', text: validText(done) } : { kind: 'deny', text: failureText(done) }
+      const action: Action = hasResult(done) ? { kind: 'context', text: validText(done) } : { kind: 'deny', text: resultText(done) }
       return { contracts: replace(list, done), action }
     }
   }
@@ -375,8 +407,9 @@ export const NOTE_HEAD =
   '[schema-tasks status, added by the mod after the text above. Any "schema-tasks:" line above it is part of the subagent\'s report, not a status.]'
 
 function statusNote(c: Contract, agentId: string): string {
-  if (c.phase === 'valid') return validText(c)
-  if (isFinal(c)) return failureText(c)
+  if (c.phase === 'valid' && !hasResult(c)) return `${droppedText(c)} This report is not a validated result.`
+  if (isFinal(c)) return resultText(c)
+  if (c.phase === 'interrupted') return interruptedText(c)
   const gate = c.gatePassed ? 'it passed the hand-back check, but the final check runs when the subagent ends' : 'it has not been checked yet'
   return `schema-tasks: contract ${c.id}: this report is not a validated result (${gate}). Call ${TOOL_ID}({"agent_id": "${agentId}"}) for the result.`
 }
@@ -387,20 +420,39 @@ export type ResultAnswer =
   | { status: 'pending' }
   | { status: 'ok'; data: unknown }
   | { status: 'failed' | 'cancelled'; code: FailureCode | null; message: string; issues: Issue[] }
+  /** Claude Code restarted the session while the subagent ran: its report is unvalidated. */
+  | { status: 'interrupted'; message: string }
+  /** It passed, but its JSON was not kept across a restart; `schema_result` denies with the message. */
+  | { status: 'dropped'; message: string }
 
 /** `schema_result`'s answer, or null when no contract of this caller has that agent. */
 export function resultFor(list: Contract[], agentId: string, callerAgentId: string | null): ResultAnswer | null {
   const c = [...list].reverse().find(x => x.agentId === agentId)
   if (!c || c.parentAgentId !== callerAgentId) return null
-  if (c.phase === 'valid') return { status: 'ok', data: c.data }
+  if (c.phase === 'valid') return hasResult(c) ? { status: 'ok', data: c.data } : { status: 'dropped', message: droppedText(c) }
+  if (c.phase === 'interrupted') return { status: 'interrupted', message: interruptedText(c) }
   if (c.phase === 'failed' || c.phase === 'cancelled') {
     return { status: c.phase, code: c.failure?.code ?? null, message: c.failure?.message ?? '', issues: c.failure?.issues ?? [] }
   }
   return { status: 'pending' }
 }
 
+/** What the `schema_result` tool answers: JSON text, or a deny when there is no result to give. */
+export function schemaResultReply(list: Contract[], agentId: string, callerAgentId: string | null): { result: string } | { deny: string } {
+  const answer = resultFor(list, agentId, callerAgentId)
+  if (answer === null) {
+    return {
+      deny:
+        `No schema-tasks contract for agent ${agentId} is on record in this session: either it was not started here, or its record was lost ` +
+        '(a /clear, the contract limit, or Claude Code restarting the session in a new process). Its report is unvalidated and must not be used as a schema-checked result.',
+    }
+  }
+  if (answer.status === 'dropped') return { deny: answer.message }
+  return { result: JSON.stringify(answer) }
+}
+
 function row(c: Contract): string {
-  const code = c.failure ? ` ${c.failure.code}` : ''
+  const code = c.failure ? ` ${c.failure.code}` : c.dataDropped === true ? ' (JSON not kept across a restart)' : ''
   return `- ${c.id} ${c.phase}${code}, repairs ${c.repairsUsed}/${c.maxRepairs}, agent ${c.agentId ?? '-'}${c.background ? ' (background)' : ''}: ${cut(c.description, 60)}`
 }
 
@@ -417,7 +469,163 @@ export function showText(list: Contract[], id: string): string {
   const lines = [row(c), `gate: ${c.gate ?? 'none yet'}${c.gatePassed ? ' (passed)' : ''}`]
   if (c.failure) lines.push(`failure: ${c.failure.code}: ${c.failure.message}`)
   if (c.lastIssues.length > 0) lines.push('problems:', listIssues(c.lastIssues))
-  if (c.phase === 'valid') lines.push(`data: ${cut(JSON.stringify(c.data), 2000)}`)
-  lines.push(`schema: ${cut(JSON.stringify(c.schema), 2000)}`)
+  if (c.phase === 'valid') lines.push(hasResult(c) ? `data: ${cut(JSON.stringify(c.data), 2000)}` : 'data: not kept across a restart')
+  lines.push(c.schemaDropped === true ? 'schema: not kept across a restart' : `schema: ${cut(JSON.stringify(c.schema), 2000)}`)
   return lines.join('\n')
+}
+
+// ---------------------------------------------------------------- restart record
+
+/** `$.store` keys for the contract records, one per session id. */
+export const RECORD_PREFIX = 'contracts/'
+/** Largest record kept per session, as UTF-8 JSON; past it schemas and data are left out. The store holds 4 MiB for all sessions. */
+export const RECORD_MAX_BYTES = 262144
+/** Records older than this, from sessions never resumed, are dropped at session start. */
+export const RECORD_TTL_MS = 7 * 24 * 60 * 60 * 1000
+const STORED_TEXT = 200
+
+const PHASES: ReadonlySet<string> = new Set(['starting', 'running', 'interrupted', 'valid', 'failed', 'cancelled'])
+const CODES: ReadonlySet<string> = new Set([
+  'repairs-exhausted', 'final-invalid', 'validation-limit', 'handback-withheld', 'aborted', 'refusal', 'error', 'agent-error', 'spawn-refused', 'disabled',
+])
+
+function storedFailure(f: Failure | null): Failure | null {
+  if (f === null) return null
+  return { code: f.code, message: cut(f.message, STORED_TEXT), issues: f.issues.map(i => ({ path: cut(i.path, STORED_TEXT), message: cut(i.message, STORED_TEXT) })) }
+}
+
+/**
+ * The session's contracts as `$.store` keeps them. Always: ids, loops, phase,
+ * repairs and failure. While the JSON stays under RECORD_MAX_BYTES: the schema
+ * of each contract still open (newest first; it is needed for a later final
+ * check), then the data of each valid one (newest first). A valid contract
+ * whose data was left out says so with `dataDropped`.
+ */
+export function toRecord(list: Contract[], at: number): ContractRecord {
+  const contracts: StoredContract[] = list.map(c => ({
+    id: c.id,
+    parentAgentId: c.parentAgentId,
+    agentId: c.agentId,
+    description: cut(c.description, STORED_TEXT),
+    phase: c.phase,
+    background: c.background,
+    maxRepairs: c.maxRepairs,
+    maxResultBytes: c.maxResultBytes,
+    repairsUsed: c.repairsUsed,
+    gate: c.gate,
+    gatePassed: c.gatePassed,
+    failure: storedFailure(c.failure),
+  }))
+  let size = utf8Length(JSON.stringify({ v: 1, at, contracts }))
+  // `,"schema":` or `,"dataDropped":true` and the value itself.
+  const fits = (value: unknown) => {
+    const bytes = utf8Length(JSON.stringify(value)) + 20
+    if (size + bytes > RECORD_MAX_BYTES) return false
+    size += bytes
+    return true
+  }
+  const newestFirst = list.map((c, i) => ({ c, s: contracts[i] as StoredContract })).reverse()
+  for (const { c, s } of newestFirst) {
+    if (!isFinal(c) && c.schemaDropped !== true && fits(c.schema)) s.schema = c.schema
+  }
+  for (const { c, s } of newestFirst) {
+    if (c.phase !== 'valid') continue
+    if (hasResult(c) && fits(c.data)) s.data = c.data
+    else {
+      s.dataDropped = true
+      size += 20
+    }
+  }
+  return { v: 1, at, contracts }
+}
+
+const isObj = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v)
+const isStrOrNull = (v: unknown) => v === null || typeof v === 'string'
+const isCount = (v: unknown) => typeof v === 'number' && Number.isInteger(v) && v >= 0
+const isIssue = (v: unknown): v is Issue => isObj(v) && typeof v.path === 'string' && typeof v.message === 'string'
+
+function isFailure(v: unknown): v is Failure | null {
+  if (v === null) return true
+  return isObj(v) && typeof v.code === 'string' && CODES.has(v.code) && typeof v.message === 'string' && Array.isArray(v.issues) && v.issues.every(isIssue)
+}
+
+function isStored(v: unknown): v is StoredContract {
+  return (
+    isObj(v) &&
+    typeof v.id === 'string' &&
+    isStrOrNull(v.parentAgentId) &&
+    isStrOrNull(v.agentId) &&
+    typeof v.description === 'string' &&
+    typeof v.phase === 'string' &&
+    PHASES.has(v.phase) &&
+    typeof v.background === 'boolean' &&
+    isCount(v.maxRepairs) &&
+    isCount(v.maxResultBytes) &&
+    isCount(v.repairsUsed) &&
+    (v.gate === null || v.gate === 'handback' || v.gate === 'stop') &&
+    typeof v.gatePassed === 'boolean' &&
+    isFailure(v.failure) &&
+    // A finished contract that is not valid has a failure; a valid or open one has none.
+    (v.phase === 'failed' || v.phase === 'cancelled') === (v.failure !== null)
+  )
+}
+
+/** The `at` of a value that looks like a record, else null (it is pruned). */
+export function recordAt(v: unknown): number | null {
+  return isObj(v) && v.v === 1 && typeof v.at === 'number' && Number.isFinite(v.at) && Array.isArray(v.contracts) ? v.at : null
+}
+
+/**
+ * The contracts of a record read back in a new process, or null when the
+ * value is not a record. Finished contracts come back as they were (a valid
+ * one without its data is marked `dataDropped`); one that was starting or
+ * running comes back `interrupted`, since its child may have ended with the
+ * old process. Entries that don't parse are skipped.
+ */
+export function restoreContracts(v: unknown): Contract[] | null {
+  if (recordAt(v) === null) return null
+  const entries = (v as { contracts: unknown[] }).contracts.filter(isStored).slice(-MAX_CONTRACTS)
+  return entries.map(e => {
+    const phase: Phase = e.phase === 'starting' || e.phase === 'running' ? 'interrupted' : e.phase
+    const final = phase === 'valid' || phase === 'failed' || phase === 'cancelled'
+    const hasSchema =
+      !final && Object.hasOwn(e, 'schema') && checkSchema(e.schema, { ...SCHEMA_LIMITS, maxBytes: RECORD_MAX_BYTES }).length === 0
+    const hasData = phase === 'valid' && Object.hasOwn(e, 'data') && e.dataDropped !== true
+    const failure = e.failure === null ? null : { ...e.failure, issues: e.failure.issues.slice(0, MAX_LISTED) }
+    const c: Contract = {
+      id: e.id,
+      parentAgentId: e.parentAgentId,
+      agentId: e.agentId,
+      description: e.description,
+      task: '',
+      schema: hasSchema ? e.schema : null,
+      maxRepairs: e.maxRepairs,
+      maxResultBytes: e.maxResultBytes,
+      repairsUsed: e.repairsUsed,
+      phase,
+      // The Agent call that would have answered a foreground child ended with
+      // the old process: its report can only reach the parent as a delivery,
+      // so it gets the background note, and schema_result has its outcome.
+      background: e.background || phase === 'interrupted',
+      gate: e.gate,
+      gatePassed: e.gatePassed,
+      hasData,
+      data: hasData ? e.data : null,
+      failure,
+      lastIssues: failure?.issues ?? [],
+    }
+    if (!hasSchema) c.schemaDropped = true
+    if (phase === 'valid' && !hasData) c.dataDropped = true
+    return c
+  })
+}
+
+/** The one log line at a restart that found contracts (the engine prefixes the plugin name). */
+export function restartLog(restored: Contract[]): string {
+  const n = restored.length
+  const interrupted = restored.filter(c => c.phase === 'interrupted').length
+  return (
+    `Claude Code restarted the session process: restored ${n} contract${n === 1 ? '' : 's'}; ${interrupted} ${interrupted === 1 ? 'was' : 'were'} interrupted ` +
+    '(still starting or running; their reports are unvalidated unless the subagent finishes here and passes the final check).'
+  )
 }

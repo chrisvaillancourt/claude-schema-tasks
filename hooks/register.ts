@@ -3,8 +3,9 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import {
   INITIAL,
+  RECORD_PREFIX,
+  RECORD_TTL_MS,
   TEACH,
-
   TOOL_NAME,
   USAGE,
   childPrompt,
@@ -14,9 +15,13 @@ import {
   newContract,
   parseArgs,
   parseEnvelope,
-  resultFor,
+  recordAt,
+  restartLog,
+  restoreContracts,
+  schemaResultReply,
   showText,
   statusText,
+  toRecord,
   transition,
 } from './policy'
 import type { Action, AgentOutcome, ContractEvent, EnvelopeParse } from './policy'
@@ -41,14 +46,73 @@ function log($: EngineInterface, text: string) {
   }
 }
 
+/**
+ * Writes the session's contracts through to `$.store`, which outlives the
+ * process (`$.state` does not), and deletes the key when there are none.
+ * Best effort: a store fault never changes what a hook does.
+ */
+async function persist($: EngineInterface, list: Contract[]) {
+  try {
+    const key = RECORD_PREFIX + (await $.session.id())
+    if (list.length === 0) await $.store.delete(key)
+    else await $.store.set(key, toRecord(list, await $.clock.now()))
+  } catch {
+    // Best effort: schema_result reads $.state; the record only matters after a restart.
+  }
+}
+
+/**
+ * In a process whose `$.state` holds no contracts (a new process, not a hot
+ * reload), a record for this session means Claude Code restarted the session:
+ * restore it, open contracts as `interrupted`, and say so once.
+ */
+async function recover($: EngineInterface) {
+  try {
+    if ((await read($, contractsAtom)).length > 0) return // a hot reload: state and record are current
+    const key = RECORD_PREFIX + (await $.session.id())
+    const stored = await $.store.get(key)
+    if (stored === undefined) return
+    const restored = restoreContracts(stored) ?? []
+    let landed: Contract[] = []
+    let isRestored = false
+    if (restored.length > 0) {
+      landed = await update($, contractsAtom, cur => {
+        isRestored = cur.length === 0
+        return isRestored ? restored : cur
+      })
+    }
+    await persist($, landed)
+    if (isRestored) log($, restartLog(restored))
+  } catch {
+    // Best effort: without the record, schema_result says the contract may have been lost.
+  }
+}
+
+/** Drops records other sessions left behind and never came back to, and ones that don't parse. */
+async function prune($: EngineInterface) {
+  try {
+    const cutoff = (await $.clock.now()) - RECORD_TTL_MS
+    for (const key of await $.store.keys()) {
+      if (!key.startsWith(RECORD_PREFIX)) continue
+      const at = recordAt(await $.store.get(key))
+      if (at === null || at < cutoff) await $.store.delete(key)
+    }
+  } catch {
+    // Best effort.
+  }
+}
+
 /** Applies one event in one versioned update; the action is the one from the run that landed. */
 async function step($: EngineInterface, ev: ContractEvent): Promise<Action> {
   let action: Action = { kind: 'pass' }
-  await update($, contractsAtom, list => {
-    const r = transition(list, ev)
+  let changed = false
+  const list = await update($, contractsAtom, cur => {
+    const r = transition(cur, ev)
     action = r.action
+    changed = r.contracts !== cur
     return r.contracts
   })
+  if (changed) await persist($, list)
   return action
 }
 
@@ -96,9 +160,12 @@ export const register: Register = (on, options) => {
       name: TOOL_NAME,
       description:
         'Result of a schema-tasks structured delegation that ran in the background: pass the subagent\'s agent id as agent_id. ' +
-        'Answers {status: "pending"}, {status: "ok", data} with the validated JSON, or {status: "failed" | "cancelled", code, message, issues}.',
+        'Answers {status: "pending"}, {status: "ok", data} with the validated JSON, {status: "failed" | "cancelled", code, message, issues}, ' +
+        'or {status: "interrupted", message} when Claude Code restarted the session while the subagent ran (its report is unvalidated).',
       inputSchema: { type: 'object', properties: { agent_id: { type: 'string' } }, required: ['agent_id'], additionalProperties: false },
     })
+    await recover($)
+    await prune($)
     return next(e)
   })
 
@@ -230,8 +297,6 @@ export const register: Register = (on, options) => {
   on('tool.call', { tool: 'mcp__schema-tasks__schema_result' }, async ($, e) => {
     const agentId = (e as { agent_id?: unknown }).agent_id
     if (typeof agentId !== 'string') return { deny: 'schema_result needs agent_id, the subagent\'s agent id.' }
-    const answer = resultFor(await read($, contractsAtom), agentId, e.agentId ?? null)
-    if (answer === null) return { deny: `No schema-tasks contract for agent ${agentId} is on record in this session: either it was not started here, or its record was lost (a /clear, the contract limit, or Claude Code restarting the session in a new process). Its report is unvalidated and must not be used as a schema-checked result.` }
-    return { result: JSON.stringify(answer) }
+    return schemaResultReply(await read($, contractsAtom), agentId, e.agentId ?? null)
   }).catch(() => ({ deny: 'schema_result failed; no result is available.' }))
 }
