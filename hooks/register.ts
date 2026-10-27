@@ -231,7 +231,7 @@ export const register: Register = (on, options) => {
     const agentId = (e as { agent_id?: unknown }).agent_id
     if (typeof agentId !== 'string') return { deny: 'schema_result needs agent_id, the subagent\'s agent id.' }
     const answer = resultFor(await read($, contractsAtom), agentId, e.agentId ?? null)
-    if (answer === null) return { deny: `No contract for agent ${agentId} was started by this conversation.` }
+    if (answer === null) return { deny: `No schema-tasks contract for agent ${agentId} is on record in this session: either it was not started here, or its record was lost (a /clear, the contract limit, or Claude Code restarting the session in a new process). Its report is unvalidated and must not be used as a schema-checked result.` }
     return { result: JSON.stringify(answer) }
   }).catch(() => ({ deny: 'schema_result failed; no result is available.' }))
 }

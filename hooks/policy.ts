@@ -318,7 +318,7 @@ export function transition(list: Contract[], ev: ContractEvent): Step {
     }
     case 'agentResult': {
       const found = list.find(x => x.id === ev.id)
-      if (!found) return { contracts: list, action: { kind: 'deny', text: `schema-tasks: contract ${ev.id} was lost (too many delegations, or a /clear); its result is not checked and must not be used.` } }
+      if (!found) return { contracts: list, action: { kind: 'deny', text: `schema-tasks: contract ${ev.id} was lost (too many delegations, a /clear, or Claude Code restarting the session in a new process); its result is not checked and must not be used.` } }
       const o = ev.outcome
       if (o.kind === 'error') {
         return { contracts: isFinal(found) ? list : replace(list, fail(found, 'agent-error', 'the Agent call failed')), action: PASS }

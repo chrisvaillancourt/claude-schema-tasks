@@ -235,7 +235,22 @@ describe('schema-tasks', () => {
     const done = await $.tool.call({ tool: TOOL, agent_id: 'a1' } as any)
     expect(JSON.parse(done.result as string)).toEqual({ status: 'ok', data: { verdict: 'pass' } })
     const other = await $.tool.call({ tool: TOOL, agent_id: 'a1', agentId: 'intruder' } as any)
-    expect(String(other.deny ?? other.text)).toContain('No contract')
+    const denied = String(other.deny ?? other.text)
+    expect(denied).toContain('No schema-tasks contract for agent a1 is on record in this session')
+    expect(denied).toContain('restarting the session in a new process')
+    expect(denied).toContain('unvalidated and must not be used')
+  })
+
+  test('schema_result for an agent with no contract on record says the record may be lost, and never answers data', async ($, on) => {
+    world(on, $, fresh(async () => null, { background: true }))
+    await start($)
+    const r = await $.tool.call({ tool: TOOL, agent_id: 'a7' } as any)
+    expect(r.result).toBeUndefined()
+    const denied = String(r.deny)
+    expect(denied).not.toContain('was started by this conversation')
+    expect(denied).toContain('either it was not started here, or its record was lost')
+    expect(denied).toContain('a /clear, the contract limit, or Claude Code restarting the session in a new process')
+    expect(denied).toContain('unvalidated and must not be used as a schema-checked result')
   })
 
   test('background (R1-4): the completion notice and the hand-back delivery carry the contract status', async ($, on) => {

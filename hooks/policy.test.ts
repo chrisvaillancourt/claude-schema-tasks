@@ -249,6 +249,11 @@ describe('transition', () => {
   test('a lost contract fails closed', async () => {
     const r = transition([], { kind: 'agentResult', id: 'gone', outcome: { kind: 'completed', agentId: 'a1', text: '{"verdict":"pass"}' } })
     expect(r.action.kind).toBe('deny')
+    const text = (r.action as { text: string }).text
+    expect(text).toContain('was lost')
+    expect(text).toContain('a /clear')
+    expect(text).toContain('restarting the session in a new process')
+    expect(text).toContain('must not be used')
   })
 
   test('the list stays bounded, dropping the oldest finished contract', async () => {

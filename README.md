@@ -81,7 +81,7 @@ The mod makes no model calls of its own. Its costs are:
 - The `SubagentStop` gate is not verified live (see above). Where neither gate fires, the final check still holds: an invalid answer is a failure, but the subagent gets no chance to repair it.
 - The child is bound by the `agentId` its spawn resolves. If a gate event ever arrived before that binding, the gate would pass it by; the final check then fails closed.
 - With a background subagent, the completion notice and the delivered report carry the subagent's raw report; the status the mod adds after them is best effort (a plugin seated above can skip it). Only `schema_result` is authoritative.
-- Contracts live in session state: at most 16 are kept (the oldest finished go first), they survive a hot reload, and a `/clear` or a restart forgets them.
+- Contracts live in session state: at most 16 are kept (the oldest finished go first), they survive a hot reload, and a `/clear` or a restart forgets them. That includes Claude Code moving a background (`--bg`) session to a new process, which the daemon can do mid-turn when it upgrades. After that, `schema_result` for a subagent started before the move answers that no contract for it is on record (it was not started here, or its record was lost), and the subagent's report is unvalidated.
 - The teaching paragraph is in every agent's Agent description, and `schema_result` is listed for subagents too; a subagent has been seen calling it by mistake (it answers with an error and does no harm).
 - A plugin seated above this one can skip any of its hooks. A skipped pre-check means an envelope runs as an ordinary prompt with no contract; the mod cannot detect that.
 
