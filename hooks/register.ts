@@ -35,7 +35,7 @@ let config: Config = configFrom({})
 /** Best effort: reporting must never throw out of a hook. */
 function log($: EngineInterface, text: string) {
   try {
-    $.ui.log(`${NAME}: ${text}`)
+    $.ui.log(text) // the engine prefixes the plugin name
   } catch {
     // nothing to do
   }

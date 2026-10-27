@@ -13,6 +13,7 @@ type Script = (T: any, agentId: string) => Promise<{ answer: string; reason?: 'a
 type World = {
   spawnPrompts: string[]
   handbacks: string[]
+  logs: string[]
   agentCalls: number
   script: Script
   background: boolean
@@ -32,7 +33,10 @@ function world(on: On, T: any, w: World) {
     return { model: 'claude-haiku-5-5', agentId: `a${n}` }
   })
   on('classic.SubagentStop', () => ({}))
-  on('ui.log', () => ({ value: undefined }))
+  on('ui.log', ($, e) => {
+    w.logs.push(e.text)
+    return { value: undefined }
+  })
   on('turn.complete', ($, e) => ({ text: e.answer }))
   mock.session(on)
   on('tool.call', async ($, e) => {
@@ -63,7 +67,7 @@ function world(on: On, T: any, w: World) {
 }
 
 function fresh(script: Script, over: Partial<World> = {}): World {
-  return { spawnPrompts: [], handbacks: [], agentCalls: 0, script, background: false, pointer: false, ...over }
+  return { spawnPrompts: [], handbacks: [], logs: [], agentCalls: 0, script, background: false, pointer: false, ...over }
 }
 
 const start = ($: any) => $.session.start({ cwd: '/x', surface: 'terminal', isInteractive: false })
@@ -110,6 +114,9 @@ describe('schema-tasks', () => {
     expect(r.deny).toBeUndefined()
     expect(r.context?.join('\n')).toContain('Validated JSON:\n{"verdict":"pass"}')
     expect((await status($)).text).toContain('valid, repairs 2/3')
+    // The engine prefixes every ui.log line with the plugin name; the mod adds none.
+    expect(w.logs.length).toBeGreaterThan(0)
+    for (const line of w.logs) expect(line.startsWith('schema-tasks: ')).toBe(false)
   })
 
   test('stop path: an invalid last reply is blocked, a valid one ends the child', async ($, on) => {
