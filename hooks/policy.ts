@@ -478,11 +478,15 @@ export function showText(list: Contract[], id: string): string {
 
 /** `$.store` keys for the contract records, one per session id. */
 export const RECORD_PREFIX = 'contracts/'
-/** Largest record kept per session, as UTF-8 JSON; past it schemas and data are left out. The store holds 4 MiB for all sessions. */
-export const RECORD_MAX_BYTES = 262144
-/** Records older than this, from sessions never resumed, are dropped at session start. */
-export const RECORD_TTL_MS = 7 * 24 * 60 * 60 * 1000
+/** Largest record kept per session, as UTF-8 JSON, stubs included; past it schemas and data are left out, then issue lists cut, then the oldest stubs. */
+export const RECORD_MAX_BYTES = 64 * 1024
+/** Records older than this, from sessions not resumed, are dropped at session start (a daemon restart resumes at once). */
+export const RECORD_TTL_MS = 48 * 60 * 60 * 1000
+/** What all records together may hold after the prune at session start: headroom under the store's 4 MiB per plugin. */
+export const STORE_MAX_BYTES = 2 * 1024 * 1024
 const STORED_TEXT = 200
+/** Issues kept per failure when the stubs alone are over the cap. */
+const CUT_ISSUES = 3
 
 const PHASES: ReadonlySet<string> = new Set(['starting', 'running', 'interrupted', 'valid', 'failed', 'cancelled'])
 const CODES: ReadonlySet<string> = new Set([
@@ -496,13 +500,15 @@ function storedFailure(f: Failure | null): Failure | null {
 
 /**
  * The session's contracts as `$.store` keeps them. Always: ids, loops, phase,
- * repairs and failure. While the JSON stays under RECORD_MAX_BYTES: the schema
+ * repairs and failure, as long as they fit RECORD_MAX_BYTES themselves (else
+ * issue lists are cut to CUT_ISSUES, then to none, then the oldest stubs are
+ * dropped, finished ones first). While the JSON stays under it: the schema
  * of each contract still open (newest first; it is needed for a later final
  * check), then the data of each valid one (newest first). A valid contract
  * whose data was left out says so with `dataDropped`.
  */
 export function toRecord(list: Contract[], at: number): ContractRecord {
-  const contracts: StoredContract[] = list.map(c => ({
+  const stubs: StoredContract[] = list.map(c => ({
     id: c.id,
     parentAgentId: c.parentAgentId,
     agentId: c.agentId,
@@ -516,7 +522,22 @@ export function toRecord(list: Contract[], at: number): ContractRecord {
     gatePassed: c.gatePassed,
     failure: storedFailure(c.failure),
   }))
-  let size = utf8Length(JSON.stringify({ v: 1, at, contracts }))
+  let pairs = list.map((c, i) => ({ c, s: stubs[i] as StoredContract }))
+  const measure = () => utf8Length(JSON.stringify({ v: 1, at, contracts: pairs.map(p => p.s) }))
+  let size = measure()
+  for (const keep of [CUT_ISSUES, 0]) {
+    if (size <= RECORD_MAX_BYTES) break
+    for (const { s } of pairs) if (s.failure !== null) s.failure = { ...s.failure, issues: s.failure.issues.slice(0, keep) }
+    size = measure()
+  }
+  while (size > RECORD_MAX_BYTES && pairs.length > 0) {
+    let i = pairs.findIndex(p => isFinal(p.c))
+    if (i < 0) i = pairs.findIndex(p => p.c.phase === 'interrupted')
+    if (i < 0) i = 0
+    pairs = pairs.filter((_, j) => j !== i)
+    size = measure()
+  }
+  const contracts = pairs.map(p => p.s)
   // `,"schema":` or `,"dataDropped":true` and the value itself.
   const fits = (value: unknown) => {
     const bytes = utf8Length(JSON.stringify(value)) + 20
@@ -524,7 +545,7 @@ export function toRecord(list: Contract[], at: number): ContractRecord {
     size += bytes
     return true
   }
-  const newestFirst = list.map((c, i) => ({ c, s: contracts[i] as StoredContract })).reverse()
+  const newestFirst = [...pairs].reverse()
   for (const { c, s } of newestFirst) {
     if (!isFinal(c) && c.schemaDropped !== true && fits(c.schema)) s.schema = c.schema
   }
@@ -620,12 +641,24 @@ export function restoreContracts(v: unknown): Contract[] | null {
   })
 }
 
-/** The one log line at a restart that found contracts (the engine prefixes the plugin name). */
+/**
+ * The live list with the restored contracts it lacks put before it (by id),
+ * oldest restored ones dropped past MAX_CONTRACTS. A step that lands while
+ * recovery runs keeps its contract, and the restored ones are not lost.
+ */
+export function mergeRestored(cur: Contract[], restored: Contract[]): { contracts: Contract[]; added: Contract[] } {
+  const missing = restored.filter(r => !cur.some(c => c.id === r.id))
+  const contracts = [...missing, ...cur].slice(-MAX_CONTRACTS)
+  const added = missing.filter(r => contracts.includes(r))
+  return { contracts: added.length === 0 ? cur : contracts, added }
+}
+
+/** The one log line when contracts were restored (the engine prefixes the plugin name). */
 export function restartLog(restored: Contract[]): string {
   const n = restored.length
   const interrupted = restored.filter(c => c.phase === 'interrupted').length
   return (
-    `Claude Code restarted the session process: restored ${n} contract${n === 1 ? '' : 's'}; ${interrupted} ${interrupted === 1 ? 'was' : 'were'} interrupted ` +
+    `restored ${n} contract${n === 1 ? '' : 's'} from the store (a restart of the session process or a /resume); ${interrupted} ${interrupted === 1 ? 'was' : 'were'} interrupted ` +
     '(still starting or running; their reports are unvalidated unless the subagent finishes here and passes the final check).'
   )
 }

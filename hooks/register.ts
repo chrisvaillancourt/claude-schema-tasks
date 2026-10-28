@@ -5,6 +5,7 @@ import {
   INITIAL,
   RECORD_PREFIX,
   RECORD_TTL_MS,
+  STORE_MAX_BYTES,
   TEACH,
   TOOL_NAME,
   USAGE,
@@ -12,6 +13,7 @@ import {
   configFrom,
   deliveryNote,
   isActive,
+  mergeRestored,
   newContract,
   parseArgs,
   parseEnvelope,
@@ -25,6 +27,7 @@ import {
   transition,
 } from './policy'
 import type { Action, AgentOutcome, ContractEvent, EnvelopeParse } from './policy'
+import { utf8Length } from './schema'
 import type { Config, Contract } from '../types'
 
 const NAME = 'schema-tasks'
@@ -73,29 +76,40 @@ async function recover($: EngineInterface) {
     const stored = await $.store.get(key)
     if (stored === undefined) return
     const restored = restoreContracts(stored) ?? []
-    let landed: Contract[] = []
-    let isRestored = false
-    if (restored.length > 0) {
-      landed = await update($, contractsAtom, cur => {
-        isRestored = cur.length === 0
-        return isRestored ? restored : cur
-      })
-    }
+    // A step can land between the read above and this update: merge, never replace.
+    let added: Contract[] = []
+    const landed = await update($, contractsAtom, cur => {
+      const m = mergeRestored(cur, restored)
+      added = m.added
+      return m.contracts
+    })
     await persist($, landed)
-    if (isRestored) log($, restartLog(restored))
+    if (added.length > 0) log($, restartLog(added))
   } catch {
     // Best effort: without the record, schema_result says the contract may have been lost.
   }
 }
 
-/** Drops records other sessions left behind and never came back to, and ones that don't parse. */
+/**
+ * Drops records other sessions left behind and never came back to, ones that
+ * don't parse, and then the oldest until all of them fit STORE_MAX_BYTES.
+ */
 async function prune($: EngineInterface) {
   try {
     const cutoff = (await $.clock.now()) - RECORD_TTL_MS
+    const kept: { key: string; at: number; bytes: number }[] = []
     for (const key of await $.store.keys()) {
       if (!key.startsWith(RECORD_PREFIX)) continue
-      const at = recordAt(await $.store.get(key))
+      const value = await $.store.get(key)
+      const at = recordAt(value)
       if (at === null || at < cutoff) await $.store.delete(key)
+      else kept.push({ key, at, bytes: utf8Length(JSON.stringify(value)) })
+    }
+    let total = kept.reduce((n, r) => n + r.bytes, 0)
+    for (const r of kept.sort((a, b) => a.at - b.at)) {
+      if (total <= STORE_MAX_BYTES) break
+      await $.store.delete(r.key)
+      total -= r.bytes
     }
   } catch {
     // Best effort.

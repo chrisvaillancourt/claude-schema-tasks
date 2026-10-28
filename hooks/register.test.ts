@@ -27,6 +27,8 @@ type World = {
   store: Map<string, unknown>
   /** Every store call is refused. */
   storeFails: boolean
+  /** Runs inside the first `store.get` of this key, after the value is read: another hook landing mid-recovery. */
+  duringGet?: { key: string; run: (T: any) => Promise<void> }
 }
 
 /** The engine beneath the plugin. The Agent tool spawns a child and runs `script` as that child. */
@@ -35,7 +37,16 @@ function world(on: On, T: any, w: World) {
   mock.clock(on, { now: T0 })
   on('session.id', () => ({ value: 'sid-1' }))
   const refused = { deny: 'store unavailable' }
-  on('store.get', ($, e) => (w.storeFails ? refused : { value: w.store.get(e.key) }))
+  on('store.get', async ($, e) => {
+    if (w.storeFails) return refused
+    const value = w.store.get(e.key)
+    const during = w.duringGet
+    if (during !== undefined && during.key === e.key) {
+      w.duringGet = undefined
+      await during.run(T)
+    }
+    return { value }
+  })
   on('store.set', ($, e) => {
     if (w.storeFails) return refused
     w.store.set(e.key, JSON.parse(JSON.stringify(e.value)))
@@ -437,7 +448,7 @@ describe('schema-tasks', () => {
       expect(await notice($, 'a1')).toContain('Validated JSON:\n{"verdict":"pass"}')
       const restart = w.logs.filter(l => /restart/i.test(l))
       expect(restart).toHaveLength(1)
-      expect(restart[0]).toContain('restored 2 contracts')
+      expect(restart[0]).toContain('restored 2 contracts from the store (a restart of the session process or a /resume)')
       expect(restart[0]).toContain('0 were interrupted')
       expect(restart[0]?.startsWith('schema-tasks: ')).toBe(false)
       expect(w.alerts).toEqual([])
@@ -524,10 +535,10 @@ describe('schema-tasks', () => {
       expect((await lookup($, 'a1')).deny).toContain('No schema-tasks contract')
     })
 
-    test('other sessions\' records are left alone and week-old ones are pruned', async ($, on) => {
+    test('other sessions\' records are left alone and ones older than 48 hours are pruned', async ($, on) => {
       const w = fresh(async () => null, { background: true })
       w.store.set('contracts/other', record([stored()], T0 - DAY))
-      w.store.set('contracts/old', record([stored()], T0 - 8 * DAY))
+      w.store.set('contracts/old', record([stored()], T0 - 3 * DAY))
       w.store.set('contracts/junk', 'x')
       w.store.set('unrelated', { at: 0 })
       world(on, $, w)
@@ -538,6 +549,29 @@ describe('schema-tasks', () => {
       expect(w.store.get('unrelated')).toBeDefined()
       expect(w.logs.some(l => /restart/i.test(l))).toBe(false)
       expect(String((await lookup($, 'a1')).deny)).toContain('No schema-tasks contract')
+    })
+
+    test('records are pruned oldest first until they hold at most 2 MiB together', async ($, on) => {
+      const w = fresh(async () => null, { background: true })
+      const fat = (at: number) => ({ ...record([stored()], at), pad: 'x'.repeat(600 * 1024) })
+      for (let i = 0; i < 5; i++) w.store.set(`contracts/s${i}`, fat(T0 - (5 - i) * 60_000))
+      world(on, $, w)
+      await start($)
+      // 5 x 600 KB: the two oldest go, three (1.8 MiB) stay.
+      expect([...w.store.keys()].sort()).toEqual(['contracts/s2', 'contracts/s3', 'contracts/s4'])
+    })
+
+    test('a step that lands during recovery keeps both its contract and the restored ones', async ($, on) => {
+      const w = fresh(async () => null, { background: true })
+      w.store.set(KEY, record([stored({ id: 'tr', agentId: 'r1', phase: 'valid', data: { verdict: 'fail' } })]))
+      w.duringGet = { key: KEY, run: async T => void (await agent(T, ENVELOPE)) }
+      world(on, $, w)
+      await start($)
+      expect(JSON.parse((await lookup($, 'r1')).result as string)).toEqual({ status: 'ok', data: { verdict: 'fail' } })
+      expect(JSON.parse((await lookup($, 'a1')).result as string)).toEqual({ status: 'pending' })
+      expect((w.store.get(KEY) as any).contracts.map((c: any) => c.id).sort()).toEqual(['tr', expect.any(String)].sort())
+      expect((w.store.get(KEY) as any).contracts).toHaveLength(2)
+      expect(w.logs.find(l => /restart/i.test(l))).toContain('restored 1 contract')
     })
 
     test('a store that refuses every call does not change the normal path', async ($, on) => {

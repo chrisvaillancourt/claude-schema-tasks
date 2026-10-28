@@ -395,6 +395,24 @@ describe('the record kept across a restart', () => {
     expect(r.contracts[3]?.data).toEqual({ small: true })
   })
 
+  test('the cap is 64 KB and the stubs count: issue lists are cut first, then the oldest finished stubs go', async () => {
+    expect(RECORD_MAX_BYTES).toBe(64 * 1024)
+    const issues = Array.from({ length: 20 }, (_, i) => ({ path: `/p${i}${'y'.repeat(300)}`, message: 'z'.repeat(300) }))
+    const failed = (id: string) => open({ id, agentId: `a-${id}`, phase: 'failed', failure: { code: 'final-invalid', message: 'm', issues }, lastIssues: issues })
+    const many = Array.from({ length: MAX_CONTRACTS }, (_, i) => failed(`t${i}`))
+    const r = toRecord(many, 0)
+    expect(utf8Length(JSON.stringify(r))).toBeLessThanOrEqual(RECORD_MAX_BYTES)
+    expect(r.contracts).toHaveLength(MAX_CONTRACTS)
+    expect(r.contracts.every(c => c.phase === 'failed' && c.failure !== null)).toBe(true)
+    // Ids can't be cut: stubs too big even without issues are dropped, oldest finished first, open ones kept.
+    const long = (id: string) => `${id}-${'k'.repeat(6000)}`
+    const r2 = toRecord([...Array.from({ length: 12 }, (_, i) => failed(long(`f${i}`))), running({ id: long('run') })], 0)
+    expect(utf8Length(JSON.stringify(r2))).toBeLessThanOrEqual(RECORD_MAX_BYTES)
+    expect(r2.contracts.at(-1)?.id).toBe(long('run'))
+    expect(r2.contracts.map(c => c.id)).not.toContain(long('f0'))
+    expect(r2.contracts.map(c => c.id)).toContain(long('f11'))
+  })
+
   test('restored: finished contracts as they were, open ones interrupted; a dropped schema is marked', async () => {
     const r = toRecord([running(), open({ id: 'tu0' }), valid('tu2', null), valid('tu3', 1)], 0)
     const back = restoreContracts(JSON.parse(JSON.stringify({ ...r, contracts: [...r.contracts.slice(0, 3), { ...r.contracts[3], data: undefined, dataDropped: true }] })))
