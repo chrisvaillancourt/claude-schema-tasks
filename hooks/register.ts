@@ -293,9 +293,10 @@ export const register: Register = (on, options) => {
   // A background child's report and completion notice reach its parent as
   // rows of their own; each gets the contract's status, so the raw report
   // never stands alone as a result. The notice is a queued_command attachment
-  // (door `delivery`); the hand-back is a user row (`prompt`, or `note` with no
-  // origin). The matcher keeps the hook off every other door, including those
-  // a managed plugin seated above passes on (`attachment`, `hook-context`,
+  // (door `delivery`) or a user row with origin `task-notification` (`prompt`);
+  // the hand-back is a user row (`prompt`, or `note` with no origin). The
+  // matcher keeps the hook off every other door, including those a managed
+  // plugin seated above always passes on (`attachment`, `hook-context`,
   // `compaction`), so the engine has no skip to report for it there.
   on('session.append', { door: ['delivery', 'prompt', 'note'] }, async ($, e, next) => {
     const m = e.message
