@@ -324,6 +324,25 @@ describe('schema-tasks', () => {
     expect(textOf(other)).toBe(notice('zz'))
   })
 
+  test('background: the status note goes only on the doors a notice or hand-back arrives by', async ($, on) => {
+    const w = fresh(async () => null, { background: true })
+    world(on, $, w)
+    await start($)
+    await agent($, ENVELOPE)
+    await $.turn.complete({ agentId: 'a1', turnId: 't', reason: 'answer', answer: 'not json', durationMs: 1, isAborted: false })
+    const notice = `<task-notification>\n<task-id>a1</task-id>\n<status>completed</status>\n</task-notification>`
+    const row = (door: string, type = 'user') =>
+      $.session.append({ door, origin: { kind: 'engine' }, uuid: `u-${Math.random()}`, message: { type, name: type === 'attachment' ? 'x' : undefined, role: 'user', content: [{ type: 'text', text: notice }] } } as any)
+    const textOf = (r: any) => r.message.content.map((b: any) => b.text).join('')
+
+    // A user row with no origin is a note: it still gets the status.
+    expect(textOf(await row('note'))).toContain('schema-tasks: contract')
+    // Rows a notice never arrives by (hook output, other attachments, a
+    // compaction summary that quotes one) are not this hook's.
+    for (const door of ['hook-context', 'attachment', 'compaction'])
+      expect(textOf(await row(door, door === 'compaction' ? 'user' : 'attachment'))).toBe(notice)
+  })
+
   test('background (R2-1): a report that imitates the status note still gets the real one', async ($, on) => {
     const w = fresh(async () => null, { background: true })
     world(on, $, w)
