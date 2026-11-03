@@ -1,6 +1,6 @@
 # schema-tasks
 
-A Claude Code mod (function-hook plugin) for schema-checked delegation. When Claude hands a subagent a JSON Schema through the plain Agent tool, the Agent call is answered with JSON that validates against that schema or with an explicit failure listing the problems. For a subagent in the background, that answer comes from the `schema_result` tool; the engine's completion notice and the subagent's delivered report are marked with the same status where the mod gets to see them, but they are not the result. All of this holds only while the mod's hooks run: a plugin seated above can skip them (see Limitations). The subagent is told what is wrong and gets a bounded number of chances to fix its answer before it finishes.
+A Claude Code mod (function-hook plugin) for schema-checked delegation. When Claude hands a subagent a JSON Schema through the plain Agent tool, the Agent call is answered with JSON that validates against that schema or with an explicit failure listing the problems. For a subagent in the background, that answer comes from the `schema_result` tool; the engine's completion notice and the subagent's delivered report are marked with the same status where the mod gets to see them, but they are not the result. All of this holds only while the mod's hooks run: a plugin seated above can skip them (see Limitations). The subagent is told what is wrong and gets a bounded number of chances to fix its answer before it finishes. **On Team and Enterprise accounts and machines with managed settings** that second promise holds only for subagents that report through the hand-back tool: Claude Code's built-in `cc-plugin-sec-default` skips the stop gate, so any other subagent with an invalid answer fails with no chance to repair it. The validated-JSON-or-failure answer still holds (see [Team, Enterprise and managed environments](#team-enterprise-and-managed-environments)).
 
 Claude Code's Workflow tool already checks a `schema` per agent. This mod covers the Agent tool, from the main conversation and from subagents, and leaves Workflow alone.
 
@@ -28,7 +28,7 @@ Claude Code's Workflow tool already checks a `schema` per agent. This mod covers
 **While it runs.** The subagent's prompt is rewritten to hold the task, the schema and the instruction to finish with exactly one JSON value (no code fences, no text around it). Its reply is checked strictly: the whole reply, trimmed, must parse as one JSON value and validate. A number JSON parsing can't hold (such as `1e400`, which would read as Infinity and be stored as `null`) makes the reply invalid wherever it appears, and the data handed back is checked to be exactly what was validated. A reply that fails is sent back with every problem and its JSON Pointer path (at most 20 listed), up to `maxRepairs` times. The check happens at whichever point the setup gives the mod, chosen per subagent from what actually happens:
 
 - where subagents report through a hand-back tool (`SubagentHandback`), that call is refused with the problems and the subagent tries again. **Verified live** on Claude Code 2.1.310: three refusals with path feedback, then the fourth invalid report let through and the parent given a `repairs-exhausted` failure.
-- otherwise at the subagent's stop (`SubagentStop`), which is blocked with the problems. **Covered by the test kit only**: on the machine this was built on, a managed plugin seated above (prepend tier) sends that event on before this mod sees it.
+- otherwise at the subagent's stop (`SubagentStop`), which is blocked with the problems. **Covered by the test kit only**: the machine this was built on is on a Team account, where Claude Code's built-in `cc-plugin-sec-default` sends that event on before this mod sees it (see [Team, Enterprise and managed environments](#team-enterprise-and-managed-environments)).
 
 **When it ends.** The answer the subagent delivered is checked again on its own, whatever happened before (verified live, as is the parent's note or failure below). Then:
 
@@ -38,7 +38,7 @@ Claude Code's Workflow tool already checks a `schema` per agent. This mod covers
 
 A subagent that ends without ever producing a valid answer is a failure, never a success.
 
-**Background subagents.** With `run_in_background`, the Agent call returns at once with a note to call `mcp__schema-tasks__schema_result({ "agent_id": "<id>" })` after the subagent finishes. That tool answers JSON text: `pending`, `ok` with the data, `failed`/`cancelled` with the problems, or `interrupted` after a restart (see Limitations), and only to the conversation (main loop or subagent) that started the contract (verified live). The main model may background an Agent call on its own, so this path is not rare. The engine's completion notice and the subagent's delivered report (its hand-back message) still carry the raw report; the mod adds the contract's status at the end of each (`schema-tasks: contract … failed (code)` with the problems, `passed` with the validated JSON, or a note that the report is not a validated result yet), under a header saying that any `schema-tasks:` line above it is part of the subagent's report. The note is added every time, never skipped because the report already holds text that looks like one, so a subagent can't suppress it by imitating it. **Verified live** on Claude Code 2.1.310 with a background subagent that kept sending prose: both rows reached the parent with the `repairs-exhausted` line. Treat `schema_result` as the result: a plugin seated above can skip the hook that adds the status (seen live for one row), and the notice can arrive before the final check.
+**Background subagents.** With `run_in_background`, the Agent call returns at once with a note to call `mcp__schema-tasks__schema_result({ "agent_id": "<id>" })` after the subagent finishes. That tool answers JSON text: `pending`, `ok` with the data, `failed`/`cancelled` with the problems, or `interrupted` after a restart (see Limitations), and only to the conversation (main loop or subagent) that started the contract (verified live). The main model may background an Agent call on its own, so this path is not rare. The engine's completion notice and the subagent's delivered report (its hand-back message) still carry the raw report; the mod adds the contract's status at the end of each (`schema-tasks: contract … failed (code)` with the problems, `passed` with the validated JSON, or a note that the report is not a validated result yet), under a header saying that any `schema-tasks:` line above it is part of the subagent's report. The note is added every time, never skipped because the report already holds text that looks like one, so a subagent can't suppress it by imitating it. **Verified live** on Claude Code 2.1.310 with a background subagent that kept sending prose: both rows reached the parent with the `repairs-exhausted` line. Treat `schema_result` as the result: a plugin seated above can skip the hook that adds the status (seen live for one row on 2.1.310, before the hook was narrowed to three doors), and the notice can arrive before the final check.
 
 **Nested delegation.** A subagent can delegate with its own envelope; each contract belongs to the loop that made the call.
 
@@ -78,7 +78,7 @@ The mod makes no model calls of its own. Its costs are:
 
 - Final-answer JSON only: no streamed or section-by-section results, no `error` channel for the subagent. A task that can fail should say so in its schema (for example `anyOf` with an error shape).
 - No `pattern` or `format`, no JSON Type Definition, no schema inheritance from agent definitions.
-- The `SubagentStop` gate is not verified live (see above). Where neither gate fires, the final check still holds: an invalid answer is a failure, but the subagent gets no chance to repair it.
+- The `SubagentStop` gate is not verified live, and on Team, Enterprise and managed machines it never runs (see the next section). Where neither gate fires, the final check still holds: an invalid answer is a failure (`final-invalid`), but the subagent gets no chance to repair it.
 - The child is bound by the `agentId` its spawn resolves. If a gate event ever arrived before that binding, the gate would pass it by; the final check then fails closed.
 - With a background subagent, the completion notice and the delivered report carry the subagent's raw report; the status the mod adds after them is best effort (a plugin seated above can skip it). Only `schema_result` is authoritative.
 - Contracts live in session state: at most 16 are kept (the oldest finished go first, then interrupted ones), and they survive a hot reload. A `/clear` starts a new session id and forgets them.
@@ -89,7 +89,58 @@ The mod makes no model calls of its own. Its costs are:
   - not kept: the task text, `/schema-tasks on|off` (the session goes back to the `enabled` option), and anything a hook was doing when the process ended.
   The 64 KB counts everything in the record: past it, problem lists are shortened first, then the oldest finished contracts are left out of the record (they read as no contract on record after a restart). Records of sessions not resumed within 48 hours are deleted at the next session start, and then the oldest records until all of them hold at most 2 MiB (the store holds 4 MiB for every session together). Writing the record is best effort: if the store refuses (full, or unavailable), nothing else changes, and after a restart `schema_result` says no contract is on record and the report is unvalidated, as it does for any agent it doesn't know.
 - The teaching paragraph is in every agent's Agent description, and `schema_result` is listed for subagents too; a subagent has been seen calling it by mistake (it answers with an error and does no harm).
-- A plugin seated above this one can skip any of its hooks. A skipped pre-check means an envelope runs as an ordinary prompt with no contract; the mod cannot detect that. On Team and Enterprise plans and machines with managed settings, Claude Code's built-in security plugin (`cc-plugin-sec-default`) passes `classic.*` events (`SubagentStop` among them), and the `session.append` rows for hook output, other attachments and compaction summaries, on past installed plugins. The status hook listens only on the doors a notice or hand-back arrives by (`delivery`, `prompt`, `note`), so it isn't skipped on those three doors. The built-in still passes on a `note` row that a managed plugin appends, which skips the hook on that row.
+- A plugin seated above this one can skip any of its hooks. A skipped pre-check means an envelope runs as an ordinary prompt with no contract; the mod cannot detect that. Claude Code's own built-in `cc-plugin-sec-default` skips one of them; the next section says which and what that changes.
+
+## Team, Enterprise and managed environments
+
+Claude Code (2.1.316 and later) ships a built-in plugin, `cc-plugin-sec-default`, in every install. `claude plugin list` doesn't show it. It runs ahead of every plugin a person installs when any of these holds:
+
+- the account is a Team or Enterprise organization;
+- the machine has managed settings or a managed MCP file;
+- the organization's managed `prependPlugins` lists it.
+
+It keeps the organization's classic hooks, prompt content, settings and tool policy out of reach of installed plugins and adds no policy of its own. It does this by sending these events on past them, so their hooks never run:
+
+- every `classic.*` event;
+- `session.compact`;
+- `prompt.section`, `prompt.context`, `prompt.attachment`, `prompt.compose`, `skill.prompt`, `attribution.text` and `settings.read`;
+- `session.append` rows on the doors `attachment`, `hook-context` and `compaction`, and in some cases `note` rows appended by another prepend- or append-tier plugin and `tool-message` rows from the `Skill` tool.
+
+**What it skips in this mod.** One hook, `classic.SubagentStop`: the stop gate. The status hook (`session.append`) is registered only on the doors `delivery`, `prompt` and `note`, so it runs. The one exception is a `note` row that another managed plugin appends, which is never a completion notice or hand-back this mod marks.
+
+**What still works.** Everything else runs on events the built-in leaves alone:
+
+- the envelope pre-check and the check of the Agent result (`tool.call`);
+- the subagent's rewritten prompt (`agent.spawn`);
+- the hand-back gate (`tool.call` on `SubagentHandback`);
+- the final check of the delivered answer (`turn.complete`);
+- the status note on background rows, `schema_result`, `/schema-tasks` and the restart record.
+
+So the Agent call is still answered with validated JSON or an explicit failure. Verified live on Claude Code 2.1.317 on a Team account: the built-in was seated, the subagent reported through `SubagentHandback`, and its contract ended `ok` with the validated JSON.
+
+**What doesn't.**
+
+- A subagent that doesn't report through `SubagentHandback` has no repair gate. An invalid answer fails as `final-invalid` instead of going back to the subagent for up to `maxRepairs` repairs.
+- Each time any subagent stops, with or without an envelope, Claude Code adds a notice and sends it to the main conversation as a task notification, so the model reads it:
+
+  ```
+  schema-tasks: its classic.SubagentStop hook was skipped. "cc-plugin-sec-default" runs first and sent the event on past it.
+  ```
+
+  It's expected and does no harm; it costs a few dozen tokens per subagent. It was seen live on 2.1.317 with the mod loaded by `--plugin-dir` and installed from a local-clone marketplace; an install from GitHub wasn't tested. The mod keeps the hook because no other hook can stop a subagent from finishing, and without it sessions where the built-in isn't seated would lose the stop gate.
+
+**No workaround.** Checked against the 2.1.317 API: no event the built-in leaves alone can keep a subagent going after its final answer. `turn.complete` only observes the end, `agent.spawn` acts before the start, `turn.step` can't add a message, and `$.agent` only spawns, lists and registers agents. `$.session.send` can resume a finished subagent with the problems, but a foreground Agent call has already returned by then and the parent would get a second completion notice, so the mod doesn't do this.
+
+**How to tell.** Run with `claude --debug` (or `--debug-file <path>`) and look for:
+
+```
+cc-plugin-sec-default@builtin seated outermost: the organization is team
+schema-tasks: classic.SubagentStop bypassed by cc-plugin-sec-default (tier user); beneath runs
+```
+
+A subagent whose debug lines show `tool=SubagentHandback` reports through the hand-back tool and still gets repairs.
+
+**Turning it off.** Only managed settings can unseat the built-in, so a person can't turn it off from their own settings. An organization admin who sets managed `prependPlugins` without listing `cc-plugin-sec-default` unseats it for the whole organization (through server-managed settings, MDM or `managed-settings.json`). Doing so also takes away the protection it gives the organization's own hooks and policy.
 
 ## Install
 
