@@ -268,7 +268,11 @@ export const register: Register = (on, options) => {
     return next(e)
   }).catch(($, e, next) => next(e)) // fail open: the final check still judges the answer
 
-  // Repair gate 2: the child's stop, where this event reaches the mod.
+  // Repair gate 2: the child's stop, where this event reaches the mod. The
+  // built-in cc-plugin-sec-default (seated on Team/Enterprise and managed
+  // machines) passes every classic.* event on past user plugins, and the engine
+  // then reports the skip to the model at each subagent stop. Kept anyway: no
+  // other event can block a stop, and unseated sessions need this gate.
   on('classic.SubagentStop', async ($, e, next) => {
     const act = await step($, { kind: 'reply', agentId: e.agent_id, gate: 'stop', text: e.last_assistant_message ?? '', enabled: await isOn($) })
     if (act.kind === 'repair') {
@@ -295,9 +299,11 @@ export const register: Register = (on, options) => {
   // never stands alone as a result. The notice is a queued_command attachment
   // (door `delivery`) or a user row with origin `task-notification` (`prompt`);
   // the hand-back is a user row (`prompt`, or `note` with no origin). The
-  // matcher keeps the hook off every other door, including those a managed
-  // plugin seated above always passes on (`attachment`, `hook-context`,
-  // `compaction`), so the engine has no skip to report for it there.
+  // matcher keeps the hook off every other door, including those the built-in
+  // cc-plugin-sec-default always passes on where it is seated (`attachment`,
+  // `hook-context`, `compaction`), so the engine has no skip to report for it
+  // there. It still passes on `note` rows a prepend- or append-tier plugin
+  // appends; those are never a notice or hand-back.
   on('session.append', { door: ['delivery', 'prompt', 'note'] }, async ($, e, next) => {
     const m = e.message
     if (m.type !== 'user' && m.type !== 'attachment') return next(e)
